@@ -47,7 +47,7 @@ Codex CLI 0.128.0 新增的 `/goal` 是官方版 Ralph loop,和 qcloop 解决的
 | API 稳定性 | experimental(文档未收录) | 稳定可用 |
 | 最适场景 | 单目标探索 | 批量同质任务 |
 
-**一句话**:单目标探索用 Goal,批量任务用 qcloop。详细对比见 [PRD 1.4 节](docs/PRD.md#14-设计哲学为什么选择-程序兜底-而不是-ai-自主)。
+**一句话**:单目标探索用 Goal,批量任务用 qcloop。qcloop 也支持 `--execution-mode goal_assisted` 把每条 prompt 包装成 Goal 风格,兼得两者优势。详见 [PRD 1.4 节](docs/PRD.md#14-设计哲学为什么选择-程序兜底-而不是-ai-自主)。
 
 ## 🎯 功能特性
 

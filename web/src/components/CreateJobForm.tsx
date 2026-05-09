@@ -12,6 +12,8 @@ export function CreateJobForm({ onCreated }: Props) {
   const [verifierPrompt, setVerifierPrompt] = useState('')
   const [items, setItems] = useState('')
   const [maxQCRounds, setMaxQCRounds] = useState(3)
+  const [tokenBudget, setTokenBudget] = useState(0)
+  const [executionMode, setExecutionMode] = useState<'standard' | 'goal_assisted'>('standard')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -27,6 +29,8 @@ export function CreateJobForm({ onCreated }: Props) {
         prompt_template: promptTemplate,
         verifier_prompt_template: verifierPrompt || undefined,
         max_qc_rounds: maxQCRounds,
+        token_budget_per_item: tokenBudget || undefined,
+        execution_mode: executionMode,
         items: itemList,
       })
       onCreated(job)
@@ -98,6 +102,29 @@ export function CreateJobForm({ onCreated }: Props) {
           max={10}
           style={{ ...inputStyle, width: '100px' }}
         />
+      </div>
+
+      <div style={fieldStyle}>
+        <label style={labelStyle}>Token 预算(每 item,0 = 不限制)</label>
+        <input
+          type="number"
+          value={tokenBudget}
+          onChange={(e) => setTokenBudget(Number(e.target.value))}
+          min={0}
+          style={{ ...inputStyle, width: '160px' }}
+        />
+      </div>
+
+      <div style={fieldStyle}>
+        <label style={labelStyle}>执行模式</label>
+        <select
+          value={executionMode}
+          onChange={(e) => setExecutionMode(e.target.value as 'standard' | 'goal_assisted')}
+          style={{ ...inputStyle, width: '220px' }}
+        >
+          <option value="standard">standard(直接执行)</option>
+          <option value="goal_assisted">goal_assisted(Goal 风格 prompt 包装)</option>
+        </select>
       </div>
 
       {error && (

@@ -6,6 +6,8 @@ export interface BatchJob {
   prompt_template: string
   verifier_prompt_template: string
   max_qc_rounds: number
+  token_budget_per_item: number
+  execution_mode: string // "standard" | "goal_assisted"
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed'
   created_at: string
   finished_at: string | null
@@ -53,5 +55,7 @@ export interface CreateJobRequest {
   prompt_template: string
   verifier_prompt_template?: string
   max_qc_rounds?: number
+  token_budget_per_item?: number
+  execution_mode?: string // "standard" | "goal_assisted"
   items: string[]
 }

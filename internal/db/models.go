@@ -3,6 +3,11 @@ package db
 import "time"
 
 // BatchJob 批次
+//
+// ExecutionMode 支持两种模式:
+//   - "standard":直接调 codex exec 执行原 prompt(默认)
+//   - "goal_assisted":把 prompt 包装成 goal-style(GOAL/TASK/STOP WHEN 段落)
+//     让 Codex 在单次 exec 内尽可能收敛,外层仍由 max_qc_rounds 硬停止
 type BatchJob struct {
 	ID                     string     `json:"id"`
 	Name                   string     `json:"name"`
@@ -10,6 +15,7 @@ type BatchJob struct {
 	VerifierPromptTemplate string     `json:"verifier_prompt_template"`
 	MaxQCRounds            int        `json:"max_qc_rounds"`
 	TokenBudgetPerItem     int        `json:"token_budget_per_item"` // 每个 item 的 token 预算
+	ExecutionMode          string     `json:"execution_mode"`        // standard | goal_assisted
 	Status                 string     `json:"status"`                // pending/running/completed/failed/paused
 	CreatedAt              time.Time  `json:"created_at"`
 	FinishedAt             *time.Time `json:"finished_at"`

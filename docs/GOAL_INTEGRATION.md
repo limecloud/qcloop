@@ -1,22 +1,30 @@
 # Codex Goal 功能集成方案
 
-> **状态**:本文档是设计稿,尚未实现。
+> **状态**(更新于 2026-05-10):**阶段 1 已实装** ✅
 >
-> **暂缓原因**(2026-05):Codex `/goal` 在 CLI 0.128.0 刚引入(2026-04-30),
-> 属于 experimental 特性——官方 slash-command 文档未收录、app-server
-> `thread/goal/*` RPC 标注为 experimental、社区报告 `/goal` 在 0.128.0 存在
-> 已知 bug([Issue #20591](https://github.com/openai/codex/issues/20591))、
-> 容易烧 token([Issue #14593](https://github.com/openai/codex/issues/14593))。
+> 基于用户实际使用反馈,qcloop 现已交付 Goal 集成的**阶段 1:Goal-flavored
+> prompt 包装**——批次可设置 `execution_mode=goal_assisted`,Runner 会把
+> 每次发给 codex 的 prompt 包装成 GOAL / TASK / STOP WHEN 结构,让 Codex
+> 在单次 `codex exec` 内部就尽可能朝目标收敛,同时 qcloop 外层的
+> `max_qc_rounds` + `token_budget_per_item` 继续做硬停止兜底。
 >
-> **下一步触发条件**:当满足以下任一条件时启动真实集成:
-> 1. `/goal` 从 experimental 转正,官方文档收录
-> 2. app-server 提供稳定的 `max_rounds` 参数(硬停止),补齐当前只有 token
->    budget 软停止的缺陷
-> 3. 有明确用户需求需要"单目标自主迭代"语义
+> **为什么选 prompt 包装而不是直接接 `thread/goal/*` RPC**:
+> - `/goal` slash command 是 TUI 内部的,不走 `codex exec`,无法从
+>   qcloop 外部直接复用
+> - 接 app-server 需要维持长 thread / WebSocket client / session 恢复,
+>   是独立大工程,留给阶段 2
+> - 阶段 1 的 prompt 工程手法已经在多数场景下够用,零外部依赖
 >
-> **临时策略**:qcloop 的多轮质检循环(worker + verifier + repair)已经
-> 在"可控边界内"实现了类 Goal 的语义,且停止条件是 `max_qc_rounds` 硬停
-> 止,可用性已超过 experimental 的 /goal。详见 `PRD.md` 1.4 节。
+> **使用方式**:
+> - CLI: `qcloop create --execution-mode goal_assisted ...`
+> - API: `POST /api/jobs` 传 `"execution_mode": "goal_assisted"`
+> - Web: 创建批次表单的"执行模式"下拉选 goal_assisted
+>
+> **下一步(阶段 2,尚未启动)**:
+> - 起 codex app-server,走 JSON-RPC `thread/goal/*`
+> - 维持跨 exec 的 session / thread 连续性
+> - 从 goal state 拿真实的 `tokensUsed`(当前 Goal 风格 prompt 下 tokens=0)
+> - 触发条件:用户提出明确需求,或 app-server API 从 experimental 转正
 
 ## 概述
 

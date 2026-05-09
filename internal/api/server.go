@@ -258,7 +258,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 
 // listJobs 列出所有批次
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
-	query := `SELECT id, name, prompt_template, verifier_prompt_template, max_qc_rounds, status, created_at, finished_at FROM batch_jobs ORDER BY created_at DESC`
+	query := `SELECT id, name, prompt_template, verifier_prompt_template, max_qc_rounds, token_budget_per_item, execution_mode, status, created_at, finished_at FROM batch_jobs ORDER BY created_at DESC`
 	rows, err := s.database.Conn().Query(query)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -271,7 +271,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		job := &db.BatchJob{}
 		var createdAt sql.NullString
 		var finishedAt sql.NullString
-		if err := rows.Scan(&job.ID, &job.Name, &job.PromptTemplate, &job.VerifierPromptTemplate, &job.MaxQCRounds, &job.Status, &createdAt, &finishedAt); err != nil {
+		if err := rows.Scan(&job.ID, &job.Name, &job.PromptTemplate, &job.VerifierPromptTemplate, &job.MaxQCRounds, &job.TokenBudgetPerItem, &job.ExecutionMode, &job.Status, &createdAt, &finishedAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -297,11 +297,13 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 // createJob 创建批次
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name                     string   `json:"name"`
-		PromptTemplate           string   `json:"prompt_template"`
-		VerifierPromptTemplate   string   `json:"verifier_prompt_template"`
-		MaxQCRounds              int      `json:"max_qc_rounds"`
-		Items                    []string `json:"items"`
+		Name                   string   `json:"name"`
+		PromptTemplate         string   `json:"prompt_template"`
+		VerifierPromptTemplate string   `json:"verifier_prompt_template"`
+		MaxQCRounds            int      `json:"max_qc_rounds"`
+		TokenBudgetPerItem     int      `json:"token_budget_per_item"`
+		ExecutionMode          string   `json:"execution_mode"`
+		Items                  []string `json:"items"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -309,14 +311,20 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.ExecutionMode == "" {
+		req.ExecutionMode = "standard"
+	}
+
 	job := &db.BatchJob{
-		ID:                       generateID(),
-		Name:                     req.Name,
-		PromptTemplate:           req.PromptTemplate,
-		VerifierPromptTemplate:   req.VerifierPromptTemplate,
-		MaxQCRounds:              req.MaxQCRounds,
-		Status:                   "pending",
-		CreatedAt:                time.Now(),
+		ID:                     generateID(),
+		Name:                   req.Name,
+		PromptTemplate:         req.PromptTemplate,
+		VerifierPromptTemplate: req.VerifierPromptTemplate,
+		MaxQCRounds:            req.MaxQCRounds,
+		TokenBudgetPerItem:     req.TokenBudgetPerItem,
+		ExecutionMode:          req.ExecutionMode,
+		Status:                 "pending",
+		CreatedAt:              time.Now(),
 	}
 
 	if err := s.database.CreateJob(job); err != nil {

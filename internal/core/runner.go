@@ -14,7 +14,10 @@ import (
 // Runner 批次执行器
 type Runner struct {
 	database *db.DB
-	executor executor.Executor
+	executor executor.Executor // 基础 executor
+	// activeExec 仅在一次 RunBatch 生命周期内使用:若 job.ExecutionMode 为
+	// goal_assisted,则包上 GoalAssistedExecutor;否则 == executor。
+	activeExec executor.Executor
 }
 
 // NewRunner 创建执行器(默认使用 CodexExecutor)
@@ -42,6 +45,12 @@ func (r *Runner) RunBatch(ctx context.Context, jobID string) error {
 	if job == nil {
 		return fmt.Errorf("批次不存在")
 	}
+
+	// 根据 execution_mode 决定本次 Batch 用什么 executor。
+	// goal_assisted:包一层 GoalAssistedExecutor,注入 Goal-style prompt;
+	// 其他(含空值):直接用基础 executor。
+	r.activeExec = r.buildActiveExecutor(job)
+	defer func() { r.activeExec = nil }()
 
 	if err := r.database.UpdateJobStatus(jobID, "running"); err != nil {
 		return err
@@ -88,13 +97,33 @@ func (r *Runner) processItem(ctx context.Context, job *db.BatchJob, item *db.Bat
 }
 
 // runOne 统一封装 executor 调用,返回 Result(含 tokens)。
-// 若 executor 实现了 TokenAwareExecutor 则走增强接口,否则走 legacy Execute 并 tokens=0。
+// 若 activeExec 实现了 TokenAwareExecutor 则走增强接口,否则走 legacy Execute 并 tokens=0。
 func (r *Runner) runOne(ctx context.Context, prompt string) executor.Result {
-	if tae, ok := r.executor.(executor.TokenAwareExecutor); ok {
+	exec := r.activeExec
+	if exec == nil {
+		exec = r.executor // 兜底,不应发生
+	}
+	if tae, ok := exec.(executor.TokenAwareExecutor); ok {
 		return tae.ExecuteWithTokens(ctx, prompt)
 	}
-	stdout, stderr, code, _ := r.executor.Execute(ctx, prompt)
+	stdout, stderr, code, _ := exec.Execute(ctx, prompt)
 	return executor.Result{Stdout: stdout, Stderr: stderr, ExitCode: code, TokensUsed: 0}
+}
+
+// buildActiveExecutor 根据 job.ExecutionMode 返回本次 Batch 要用的 executor
+func (r *Runner) buildActiveExecutor(job *db.BatchJob) executor.Executor {
+	switch job.ExecutionMode {
+	case "goal_assisted":
+		// 用 job 的 prompt 模板作为 goal hint(剥离 {{item}} 占位符让 Codex
+		// 更好理解整体目标),stop hint 留空走默认
+		goalHint := "按以下模板完成每个测试项:\n\n" + job.PromptTemplate
+		if job.VerifierPromptTemplate != "" {
+			goalHint += "\n\n每次完成后应能通过质检:\n" + job.VerifierPromptTemplate
+		}
+		return executor.NewGoalAssistedExecutor(r.executor, goalHint, "")
+	default: // "" 或 "standard"
+		return r.executor
+	}
 }
 
 // chargeItemTokens 把本次调用的 tokens 加到 item 上,返回加完后的总量。

@@ -784,14 +784,17 @@ npm run dev
 **核心能力**
 - [x] SQLite 持久化(4 张表:jobs/items/attempts/qc_rounds)
 - [x] Runner 多轮质检循环(worker → verifier → repair,`max_qc_rounds` 硬停止)
+- [x] **Token 预算真实扣减 + 超预算 → exhausted 熔断**
+- [x] **Codex Goal 集成(阶段 1:`execution_mode=goal_assisted` 注入 Goal 风格 prompt)**
 - [x] CodexExecutor(子进程调用 `codex exec`)
-- [x] Executor 接口 + FakeExecutor + **6 个集成测试全绿**
+- [x] Executor 接口 + FakeExecutor + **12 个集成测试全绿**
 - [x] CLI 命令:`create` / `run` / `status` / `serve`
 
 **Web 前端**
 - [x] 批次列表页(名称 / ID / 状态 / 项数 / 质检轮次 / 时间)
 - [x] 批次详情页(统计卡片 + 9 列表格 + 执行摘要标签)
-- [x] 创建批次模态框
+- [x] **批次暂停/恢复按钮 + 状态徽章**
+- [x] 创建批次模态框(含 token 预算、执行模式选项)
 - [x] 测试项详情可展开(attempt/qc_round 完整历史)
 - [x] 结果导出(JSON / CSV / Markdown)
 
@@ -799,33 +802,33 @@ npm run dev
 - [x] RESTful `/api/jobs` CRUD
 - [x] `POST /api/jobs/run` 后台运行
 - [x] `POST /api/jobs/pause` + `POST /api/jobs/resume`
-- [x] WebSocket Hub(`/ws`),支持按 job_id 订阅
+- [x] WebSocket Hub(`/ws`),支持按 job_id 订阅(前端对接待办)
 
 ### 10.2 半完成(需要继续的具体缺口)🔶
 
 | 项 | 已做 | 缺口 |
 |---|---|---|
-| **WebSocket 实时推送** | 后端 Hub + 广播就绪 | 前端仍在轮询,未切到 WebSocket |
-| **批次暂停/恢复** | 后端 API 实现 | 前端列表/详情页无按钮入口 |
-| **Token 预算控制** | DB schema + model 字段 | Runner 未读 `token_budget_per_item`,未扣减 `tokens_used`,未熔断 |
+| **WebSocket 实时推送** | 后端 Hub + 广播就绪 | 前端仍在轮询;Runner 还未调用 Broadcast(缺事件触发点) |
 
-这三项都登记过"已完成",实际只是部分完成,在真实验收场景下尚不可用。
+历史上登记过"半完成"的另外两项 — 暂停/恢复 UI 和 Token 预算扣减 — 已在
+2026-05-10 闭环,迁移到 10.1。
 
 ### 10.3 未开始(路线图)⏳
 
 **近期(1 个月内可做)**
 - [ ] 前端对接 WebSocket,移除 2s 轮询
-- [ ] 前端补暂停/恢复按钮
-- [ ] Runner 真实执行 token 预算扣减与熔断
+- [x] ~~前端补暂停/恢复按钮~~(已完成)
+- [x] ~~Runner 真实执行 token 预算扣减与熔断~~(已完成)
+- [x] ~~Codex Goal 集成(阶段 1:goal_assisted prompt 包装)~~(已完成)
 
 **中期**
 - [ ] 并发执行(`concurrency > 1`,需要 claim 机制 + lease)
 - [ ] 崩溃恢复(lease 过期回收 in-flight item)
 - [ ] 批次取消(区别于暂停:不可恢复)
 - [ ] 批次模板管理
+- [ ] Codex Goal 集成阶段 2:接 app-server `thread/goal/*` 拿真实 tokensUsed
 
 **长期 / 受外部依赖**
-- [ ] Codex `/goal` 作为 executor 后端(待 /goal 转正,见 `GOAL_INTEGRATION.md` 暂缓说明)
 - [ ] 分布式执行(多机抢 item,需要可靠 lease)
 - [ ] 任务优先级
 - [ ] 自定义 executor(非 Codex 的 agent SDK)

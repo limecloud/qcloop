@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS batch_jobs (
     verifier_prompt_template TEXT,
     max_qc_rounds INTEGER NOT NULL DEFAULT 3,
     token_budget_per_item INTEGER NOT NULL DEFAULT 0,
+    execution_mode TEXT NOT NULL DEFAULT 'standard',
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     finished_at TEXT
@@ -72,6 +73,7 @@ CREATE INDEX IF NOT EXISTS idx_qc_rounds_item ON qc_rounds(batch_item_id);
 // 每条都允许失败(列已存在时 sqlite 会报错),调用方忽略错误即可。
 var MigrationStatements = []string{
 	`ALTER TABLE batch_jobs ADD COLUMN token_budget_per_item INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE batch_jobs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'standard'`,
 	`ALTER TABLE batch_items ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE attempts ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE qc_rounds ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0`,
