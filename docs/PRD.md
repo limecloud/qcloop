@@ -348,7 +348,121 @@ running -> pass
 
 ## 4. 技术架构
 
-### 4.1 技术栈
+### 4.1 系统架构图
+
+```mermaid
+graph TB
+    subgraph "CLI Layer"
+        CLI[CLI Commands]
+    end
+    
+    subgraph "Core Layer"
+        Dispatcher[Dispatcher<br/>串行调度器]
+        StateMachine[State Machine<br/>状态机]
+        Recovery[Recovery<br/>崩溃恢复]
+    end
+    
+    subgraph "Executor Layer"
+        ExecutorInterface[Executor Interface]
+        CodexExecutor[Codex Executor]
+        FakeExecutor[Fake Executor]
+    end
+    
+    subgraph "QC Layer"
+        Verifier[Verifier<br/>质检器]
+        Verdict[Verdict Parser<br/>判定解析]
+    end
+    
+    subgraph "Data Layer"
+        DAO[DAO Layer]
+        DB[(SQLite Database)]
+    end
+    
+    CLI --> Dispatcher
+    CLI --> Recovery
+    
+    Dispatcher --> StateMachine
+    Dispatcher --> ExecutorInterface
+    Dispatcher --> DAO
+    
+    ExecutorInterface --> CodexExecutor
+    ExecutorInterface --> FakeExecutor
+    
+    CodexExecutor --> Verifier
+    Verifier --> Verdict
+    
+    StateMachine --> DAO
+    Recovery --> DAO
+    DAO --> DB
+    
+    style CLI fill:#e1f5ff
+    style Dispatcher fill:#fff4e1
+    style ExecutorInterface fill:#f0e1ff
+    style Verifier fill:#e1ffe1
+    style DB fill:#ffe1e1
+```
+
+### 4.2 数据模型关系图
+
+```mermaid
+erDiagram
+    BATCH_JOBS ||--o{ BATCH_ITEMS : contains
+    BATCH_ITEMS ||--o{ ATTEMPTS : has
+    BATCH_ITEMS ||--o{ QC_ROUNDS : has
+    BATCH_ITEMS ||--o{ ARTIFACTS : produces
+    
+    BATCH_JOBS {
+        string id PK
+        string name
+        string status
+        string worker_prompt_template
+        string verifier_prompt_template
+        int max_qc_rounds
+        int total_items
+        int passed_items
+    }
+    
+    BATCH_ITEMS {
+        string id PK
+        string batch_job_id FK
+        string item_key UK
+        string params
+        string status
+        string lease_owner
+        datetime lease_expires_at
+        int current_attempt_no
+        int current_qc_no
+    }
+    
+    ATTEMPTS {
+        string id PK
+        string batch_item_id FK
+        int attempt_no UK
+        string status
+        string executor_type
+        string thread_id
+        string stdout
+        string stderr
+    }
+    
+    QC_ROUNDS {
+        string id PK
+        string batch_item_id FK
+        int qc_no UK
+        string status
+        string verdict
+        string feedback
+    }
+    
+    ARTIFACTS {
+        string id PK
+        string batch_item_id FK
+        string artifact_type
+        string content
+    }
+```
+
+### 4.3 技术栈
 - **后端**：Go 1.21+
 - **数据库**：SQLite 3
 - **CLI 框架**：cobra
@@ -387,57 +501,135 @@ qcloop/
 └── .gitignore
 ```
 
-### 4.3 核心流程
+### 4.5 核心流程
 
-#### 4.3.1 创建批次流程
-```
-用户输入 -> 解析参数 -> 生成 batch_job
-         -> 生成 batch_items（计算 item_key）
-         -> 写入数据库
-         -> 返回 job_id
-```
+#### 4.5.1 创建批次流程图
 
-#### 4.3.2 执行批次流程
-```
-启动 dispatcher
-  -> 事务开始
-  -> SELECT ... WHERE status IN ('pending', 'retry_pending') LIMIT 1 FOR UPDATE
-  -> UPDATE lease_owner, lease_expires_at
-  -> 事务提交
-  -> 启动 executor
-  -> 等待执行完成
-  -> 更新 attempt 状态
-  -> 判断是否需要质检
-    -> 是：启动 verifier
-    -> 否：标记 item 为 passed
-  -> 重复直到所有 item 完成
+```mermaid
+flowchart TD
+    Start([用户输入]) --> Parse[解析参数]
+    Parse --> ValidateParams{参数校验}
+    ValidateParams -->|失败| Error1[返回错误]
+    ValidateParams -->|成功| GenJob[生成 batch_job]
+    GenJob --> GenItems[生成 batch_items]
+    GenItems --> CalcKey[计算 item_key<br/>防重复]
+    CalcKey --> WriteTx[事务写入数据库]
+    WriteTx --> Success[返回 job_id]
+    
+    style Start fill:#e1f5ff
+    style Success fill:#e1ffe1
+    style Error1 fill:#ffe1e1
 ```
 
-#### 4.3.3 质检流程
-```
-启动 verifier
-  -> 执行 verifier_prompt
-  -> 解析 verdict JSON
-  -> 判断 pass
-    -> true：标记 item 为 passed
-    -> false：
-      -> 判断是否达到 max_qc_rounds
-        -> 是：标记 item 为 exhausted
-        -> 否：启动 repair
-          -> 在原 worker thread 续跑
-          -> 注入 feedback
-          -> 重复质检流程
+#### 4.5.2 执行批次时序图
+
+```mermaid
+sequenceDiagram
+    participant CLI
+    participant Dispatcher
+    participant DB
+    participant Executor
+    participant Verifier
+    
+    CLI->>Dispatcher: run(job_id)
+    
+    loop 直到所有 item 完成
+        Dispatcher->>DB: BEGIN TRANSACTION
+        Dispatcher->>DB: SELECT ... FOR UPDATE
+        DB-->>Dispatcher: next_item
+        Dispatcher->>DB: UPDATE lease_owner, lease_expires_at
+        Dispatcher->>DB: COMMIT
+        
+        Dispatcher->>Executor: execute(item)
+        Executor-->>Dispatcher: attempt_result
+        Dispatcher->>DB: save attempt
+        
+        alt 需要质检
+            Dispatcher->>Verifier: verify(attempt_result)
+            Verifier-->>Dispatcher: verdict
+            Dispatcher->>DB: save qc_round
+            
+            alt verdict.pass == false
+                alt 未达最大轮次
+                    Dispatcher->>Executor: repair(feedback)
+                    Note over Dispatcher,Executor: 在原 thread 续跑
+                else 达到最大轮次
+                    Dispatcher->>DB: mark as exhausted
+                end
+            else verdict.pass == true
+                Dispatcher->>DB: mark as passed
+            end
+        else 无需质检
+            Dispatcher->>DB: mark as passed
+        end
+    end
+    
+    Dispatcher-->>CLI: 批次完成
 ```
 
-#### 4.3.4 恢复流程
+#### 4.5.3 质检闭环流程图
+
+```mermaid
+flowchart TD
+    Start([Worker 执行完成]) --> SaveAttempt[保存 attempt]
+    SaveAttempt --> CheckVerifier{是否配置<br/>verifier?}
+    
+    CheckVerifier -->|否| MarkPassed[标记 item 为 passed]
+    CheckVerifier -->|是| RunVerifier[运行 verifier<br/>独立 thread]
+    
+    RunVerifier --> ParseVerdict[解析 verdict JSON]
+    ParseVerdict --> CheckPass{verdict.pass?}
+    
+    CheckPass -->|true| MarkPassed
+    CheckPass -->|false| CheckRounds{是否达到<br/>max_qc_rounds?}
+    
+    CheckRounds -->|是| MarkExhausted[标记 item 为 exhausted]
+    CheckRounds -->|否| IncrementQC[qc_no++]
+    
+    IncrementQC --> RunRepair[运行 repair<br/>原 worker thread 续跑]
+    RunRepair --> InjectFeedback[注入 feedback]
+    InjectFeedback --> SaveAttempt
+    
+    MarkPassed --> End([完成])
+    MarkExhausted --> End
+    
+    style Start fill:#e1f5ff
+    style End fill:#e1ffe1
+    style MarkExhausted fill:#fff4e1
 ```
-启动时扫描
-  -> SELECT ... WHERE lease_expires_at < NOW() AND status IN ('claimed', 'running', 'qc_running')
-  -> 对每个过期 item：
-    -> 查询最新 attempt 状态
-    -> 查询最新 qc_round 状态
-    -> 根据终态回滚 item 状态
-    -> 清空 lease_owner 和 lease_expires_at
+
+#### 4.5.4 崩溃恢复流程图
+
+```mermaid
+flowchart TD
+    Start([启动 qcloop]) --> ScanExpired[扫描过期 lease]
+    ScanExpired --> Query[SELECT ... WHERE<br/>lease_expires_at < NOW()]
+    Query --> HasExpired{有过期 item?}
+    
+    HasExpired -->|否| Normal[正常启动]
+    HasExpired -->|是| LoopItems[遍历过期 item]
+    
+    LoopItems --> GetAttempt[查询最新 attempt]
+    GetAttempt --> GetQC[查询最新 qc_round]
+    
+    GetQC --> CheckState{判断终态}
+    
+    CheckState -->|attempt 成功<br/>qc 未开始| Rollback1[回滚到 pending<br/>进入质检]
+    CheckState -->|attempt 成功<br/>qc 失败| Rollback2[回滚到 retry_pending<br/>返修]
+    CheckState -->|attempt 失败| Rollback3[回滚到 retry_pending<br/>重试]
+    
+    Rollback1 --> ClearLease[清空 lease_owner<br/>和 lease_expires_at]
+    Rollback2 --> ClearLease
+    Rollback3 --> ClearLease
+    
+    ClearLease --> NextItem{还有下一个?}
+    NextItem -->|是| LoopItems
+    NextItem -->|否| Normal
+    
+    Normal --> End([恢复完成])
+    
+    style Start fill:#e1f5ff
+    style End fill:#e1ffe1
 ```
 
 ## 5. 实施计划
