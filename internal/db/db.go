@@ -41,8 +41,14 @@ func Open(dbPath string) (*DB, error) {
 }
 
 func (db *DB) initSchema() error {
-	_, err := db.conn.Exec(Schema)
-	return err
+	if _, err := db.conn.Exec(Schema); err != nil {
+		return err
+	}
+	// 幂等 migration:忽略"列已存在"错误
+	for _, stmt := range MigrationStatements {
+		_, _ = db.conn.Exec(stmt)
+	}
+	return nil
 }
 
 func (db *DB) Close() error {

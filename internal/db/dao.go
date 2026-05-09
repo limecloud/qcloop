@@ -9,17 +9,17 @@ import (
 
 // CreateJob 创建批次
 func (db *DB) CreateJob(job *BatchJob) error {
-	query := `INSERT INTO batch_jobs (id, name, prompt_template, verifier_prompt_template, max_qc_rounds, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	_, err := db.conn.Exec(query, job.ID, job.Name, job.PromptTemplate, job.VerifierPromptTemplate, job.MaxQCRounds, job.Status, job.CreatedAt.Format(time.RFC3339))
+	query := `INSERT INTO batch_jobs (id, name, prompt_template, verifier_prompt_template, max_qc_rounds, token_budget_per_item, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := db.conn.Exec(query, job.ID, job.Name, job.PromptTemplate, job.VerifierPromptTemplate, job.MaxQCRounds, job.TokenBudgetPerItem, job.Status, job.CreatedAt.Format(time.RFC3339))
 	return err
 }
 
 // GetJob 获取批次
 func (db *DB) GetJob(id string) (*BatchJob, error) {
-	query := `SELECT id, name, prompt_template, verifier_prompt_template, max_qc_rounds, status, created_at, finished_at FROM batch_jobs WHERE id = ?`
+	query := `SELECT id, name, prompt_template, verifier_prompt_template, max_qc_rounds, token_budget_per_item, status, created_at, finished_at FROM batch_jobs WHERE id = ?`
 	job := &BatchJob{}
 	var createdAt, finishedAt sql.NullString
-	err := db.conn.QueryRow(query, id).Scan(&job.ID, &job.Name, &job.PromptTemplate, &job.VerifierPromptTemplate, &job.MaxQCRounds, &job.Status, &createdAt, &finishedAt)
+	err := db.conn.QueryRow(query, id).Scan(&job.ID, &job.Name, &job.PromptTemplate, &job.VerifierPromptTemplate, &job.MaxQCRounds, &job.TokenBudgetPerItem, &job.Status, &createdAt, &finishedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

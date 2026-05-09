@@ -87,6 +87,33 @@ func (r *Runner) processItem(ctx context.Context, job *db.BatchJob, item *db.Bat
 	return r.runQCLoop(ctx, job, item, attemptNo)
 }
 
+// runOne 统一封装 executor 调用,返回 Result(含 tokens)。
+// 若 executor 实现了 TokenAwareExecutor 则走增强接口,否则走 legacy Execute 并 tokens=0。
+func (r *Runner) runOne(ctx context.Context, prompt string) executor.Result {
+	if tae, ok := r.executor.(executor.TokenAwareExecutor); ok {
+		return tae.ExecuteWithTokens(ctx, prompt)
+	}
+	stdout, stderr, code, _ := r.executor.Execute(ctx, prompt)
+	return executor.Result{Stdout: stdout, Stderr: stderr, ExitCode: code, TokensUsed: 0}
+}
+
+// chargeItemTokens 把本次调用的 tokens 加到 item 上,返回加完后的总量。
+// token_budget_per_item <= 0 视为 "不限制"。
+func (r *Runner) chargeItemTokens(itemID string, delta int) (int, error) {
+	if delta <= 0 {
+		// 读一下当前值即可
+		var used int
+		err := r.database.Conn().QueryRow(`SELECT tokens_used FROM batch_items WHERE id = ?`, itemID).Scan(&used)
+		return used, err
+	}
+	if _, err := r.database.Conn().Exec(`UPDATE batch_items SET tokens_used = tokens_used + ? WHERE id = ?`, delta, itemID); err != nil {
+		return 0, err
+	}
+	var used int
+	err := r.database.Conn().QueryRow(`SELECT tokens_used FROM batch_items WHERE id = ?`, itemID).Scan(&used)
+	return used, err
+}
+
 // executeWorker 执行 worker 或 repair
 func (r *Runner) executeWorker(ctx context.Context, job *db.BatchJob, item *db.BatchItem, attemptNo int, attemptType string) (*db.Attempt, error) {
 	prompt := strings.ReplaceAll(job.PromptTemplate, "{{item}}", item.ItemValue)
@@ -104,21 +131,26 @@ func (r *Runner) executeWorker(ctx context.Context, job *db.BatchJob, item *db.B
 		return nil, err
 	}
 
-	stdout, stderr, exitCode, err := r.executor.Execute(ctx, prompt)
+	res := r.runOne(ctx, prompt)
 
 	finishedAt := time.Now()
 	attempt.FinishedAt = &finishedAt
-	attempt.Stdout = stdout
-	attempt.Stderr = stderr
-	attempt.ExitCode = &exitCode
+	attempt.Stdout = res.Stdout
+	attempt.Stderr = res.Stderr
+	attempt.ExitCode = &res.ExitCode
+	attempt.TokensUsed = res.TokensUsed
 
-	if err != nil || exitCode != 0 {
+	if res.ExitCode != 0 {
 		attempt.Status = "failed"
 	} else {
 		attempt.Status = "success"
 	}
 
 	if err := r.updateAttempt(attempt); err != nil {
+		return nil, err
+	}
+
+	if _, err := r.chargeItemTokens(item.ID, res.TokensUsed); err != nil {
 		return nil, err
 	}
 
@@ -130,6 +162,13 @@ func (r *Runner) runQCLoop(ctx context.Context, job *db.BatchJob, item *db.Batch
 	attemptNo := startAttemptNo
 
 	for qcNo := 1; qcNo <= job.MaxQCRounds; qcNo++ {
+		// 每轮开始检查 token 预算
+		if exceeded, err := r.checkBudgetExceeded(job, item); err != nil {
+			return err
+		} else if exceeded {
+			return r.database.UpdateItemStatus(item.ID, "exhausted")
+		}
+
 		// 执行 verifier
 		qcRound, err := r.executeVerifier(ctx, job, item, qcNo)
 		if err != nil {
@@ -147,6 +186,13 @@ func (r *Runner) runQCLoop(ctx context.Context, job *db.BatchJob, item *db.Batch
 			return r.database.UpdateItemStatus(item.ID, "exhausted")
 		}
 
+		// 执行 repair 前再检查一次(verifier 本身可能已超预算)
+		if exceeded, err := r.checkBudgetExceeded(job, item); err != nil {
+			return err
+		} else if exceeded {
+			return r.database.UpdateItemStatus(item.ID, "exhausted")
+		}
+
 		// 执行 repair
 		attemptNo++
 		repairAttempt, err := r.executeRepair(ctx, job, item, attemptNo, qcRound.Feedback)
@@ -161,6 +207,19 @@ func (r *Runner) runQCLoop(ctx context.Context, job *db.BatchJob, item *db.Batch
 	}
 
 	return nil
+}
+
+// checkBudgetExceeded:预算 > 0 且 item.tokens_used 已达到上限,则返回 true
+func (r *Runner) checkBudgetExceeded(job *db.BatchJob, item *db.BatchItem) (bool, error) {
+	if job.TokenBudgetPerItem <= 0 {
+		return false, nil
+	}
+	var used int
+	err := r.database.Conn().QueryRow(`SELECT tokens_used FROM batch_items WHERE id = ?`, item.ID).Scan(&used)
+	if err != nil {
+		return false, err
+	}
+	return used >= job.TokenBudgetPerItem, nil
 }
 
 // executeVerifier 执行 verifier
@@ -192,7 +251,9 @@ func (r *Runner) executeVerifier(ctx context.Context, job *db.BatchJob, item *db
 		return nil, err
 	}
 
-	stdout, _, _, err := r.executor.Execute(ctx, prompt)
+	res := r.runOne(ctx, prompt)
+	stdout := res.Stdout
+	qcRound.TokensUsed = res.TokensUsed
 
 	finishedAt := time.Now()
 	qcRound.FinishedAt = &finishedAt
@@ -220,6 +281,10 @@ func (r *Runner) executeVerifier(ctx context.Context, job *db.BatchJob, item *db
 		return nil, err
 	}
 
+	if _, err := r.chargeItemTokens(item.ID, qcRound.TokensUsed); err != nil {
+		return nil, err
+	}
+
 	return qcRound, nil
 }
 
@@ -239,12 +304,12 @@ func (r *Runner) createAttempt(attempt *db.Attempt) error {
 }
 
 func (r *Runner) updateAttempt(attempt *db.Attempt) error {
-	query := `UPDATE attempts SET status = ?, stdout = ?, stderr = ?, exit_code = ?, finished_at = ? WHERE id = ?`
+	query := `UPDATE attempts SET status = ?, stdout = ?, stderr = ?, exit_code = ?, tokens_used = ?, finished_at = ? WHERE id = ?`
 	var finishedAt interface{}
 	if attempt.FinishedAt != nil {
 		finishedAt = attempt.FinishedAt.Format(time.RFC3339)
 	}
-	_, err := r.database.Conn().Exec(query, attempt.Status, attempt.Stdout, attempt.Stderr, attempt.ExitCode, finishedAt, attempt.ID)
+	_, err := r.database.Conn().Exec(query, attempt.Status, attempt.Stdout, attempt.Stderr, attempt.ExitCode, attempt.TokensUsed, finishedAt, attempt.ID)
 	return err
 }
 
@@ -288,11 +353,11 @@ func (r *Runner) createQCRound(qc *db.QCRound) error {
 }
 
 func (r *Runner) updateQCRound(qc *db.QCRound) error {
-	query := `UPDATE qc_rounds SET status = ?, verdict = ?, feedback = ?, finished_at = ? WHERE id = ?`
+	query := `UPDATE qc_rounds SET status = ?, verdict = ?, feedback = ?, tokens_used = ?, finished_at = ? WHERE id = ?`
 	var finishedAt interface{}
 	if qc.FinishedAt != nil {
 		finishedAt = qc.FinishedAt.Format(time.RFC3339)
 	}
-	_, err := r.database.Conn().Exec(query, qc.Status, qc.Verdict, qc.Feedback, finishedAt, qc.ID)
+	_, err := r.database.Conn().Exec(query, qc.Status, qc.Verdict, qc.Feedback, qc.TokensUsed, finishedAt, qc.ID)
 	return err
 }
