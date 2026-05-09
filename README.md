@@ -4,75 +4,74 @@ Lime 批量测试编排工具 - 程序驱动的 AI 测试执行器
 
 ## 核心特性
 
-- **不漏项** - 数据库事务 claim 机制，确保每个测试项都被执行
-- **可恢复** - 崩溃后自动恢复未完成的测试项
+- **不漏项** - 数据库 claim 机制，确保每个测试项都被执行
 - **可追踪** - 完整的执行历史、轮次记录、产物存储
 - **多轮质检** - worker -> verifier -> repair 自动闭环
+- **Web 界面** - React 前端可视化批次状态
 
-## 快速开始
-
-### 安装
-
-```bash
-go install github.com/coso/qcloop/cmd/qcloop@latest
-```
-
-### 创建批次
-
-```bash
-qcloop create \
-  --name "test-lime-workspace" \
-  --worker-prompt "测试 Lime workspace 功能: {{test_case}}" \
-  --verifier-prompt "检查测试结果是否符合预期，输出 JSON: {\"pass\": bool, \"feedback\": string}" \
-  --items "create_workspace,read_config,update_settings,delete_workspace" \
-  --max-qc-rounds 3
-```
-
-### 运行批次
-
-```bash
-qcloop run --job-id <job-id>
-```
-
-### 查询状态
-
-```bash
-qcloop status --job-id <job-id>
-qcloop detail --job-id <job-id> --item-id <item-id>
-```
-
-### 恢复中断批次
-
-```bash
-qcloop recover --job-id <job-id>
-```
-
-## 架构
+## 项目结构
 
 ```
 qcloop/
-├── cmd/qcloop/          # CLI 入口
+├── cmd/qcloop/         # CLI 入口
 ├── internal/
-│   ├── db/              # SQLite schema + DAO
-│   ├── core/            # 编排引擎（dispatcher, state machine）
-│   ├── executor/        # 执行器适配（codex, fake）
-│   ├── qc/              # 质检器
-│   └── api/             # HTTP API (可选)
-└── web/                 # React 前端 (可选)
+│   ├── db/             # SQLite 数据库层
+│   ├── core/           # 编排引擎（多轮质检）
+│   ├── executor/       # codex exec 执行器
+│   └── api/            # HTTP API 服务器
+├── web/                # React + TypeScript 前端
+│   ├── src/
+│   │   ├── components/ # UI 组件
+│   │   ├── hooks/      # React Hooks
+│   │   ├── api/        # API 客户端
+│   │   └── types/      # TypeScript 类型
+│   └── package.json
+├── docs/               # 产品文档
+│   ├── PRD.md          # 完整 PRD
+│   └── PRD_SIMPLE.md   # 精简版 PRD
+└── go.mod
 ```
 
-## 开发
+## 快速开始
 
-### 运行测试
-
-```bash
-go test ./...
-```
-
-### 本地构建
+### 1. 构建后端
 
 ```bash
 go build -o qcloop ./cmd/qcloop
+```
+
+### 2. 启动 API 服务器
+
+```bash
+./qcloop serve --addr :8080
+```
+
+### 3. 启动前端（开发模式）
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+然后访问 http://localhost:3000
+
+### 4. 或使用 CLI
+
+```bash
+# 创建批次
+./qcloop create \
+  --name "test-lime" \
+  --prompt "测试 Lime 功能: {{item}}" \
+  --verifier-prompt "检查结果，输出 JSON: {\"pass\": bool, \"feedback\": string}" \
+  --items "a,b,c" \
+  --max-qc-rounds 3
+
+# 运行批次
+./qcloop run --job-id <id>
+
+# 查询状态
+./qcloop status --job-id <id>
 ```
 
 ## 工作原理
@@ -80,16 +79,24 @@ go build -o qcloop ./cmd/qcloop
 ### 1. 批次创建
 用户提供 prompt 模板和测试项列表，qcloop 创建批次并写入数据库。
 
-### 2. 串行调度
-dispatcher 逐个 claim 测试项（事务内写 lease），确保不重复、不遗漏。
+### 2. 多轮质检循环
+对每个测试项：
+1. **Worker**: 调用 `codex exec` 执行任务
+2. **Verifier**: 独立审查结果（输出 JSON verdict）
+3. **Repair**: 如果质检失败，根据 feedback 自动返修
+4. 重复直到通过或达到 max_qc_rounds
 
-### 3. 执行与质检
-- **worker**: 调用 `codex exec` 执行测试
-- **verifier**: 独立审查结果
-- **repair**: 如果 verifier fail，自动返修
+### 3. 界面展示
+- 批次表格视图
+- 实时状态更新（2s 轮询）
+- 执行摘要（首次 + 质检1/2/3...）
+- 统计卡片（总数/成功/失败/进行中）
 
-### 4. 崩溃恢复
-启动时扫描过期 lease，自动恢复未完成项。
+## 技术栈
+
+**后端**：Go + SQLite + HTTP Server
+**前端**：React + TypeScript + Vite
+**执行器**：codex exec（子进程）
 
 ## License
 
