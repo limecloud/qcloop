@@ -1,0 +1,348 @@
+# qcloop — Full Reference for AI Agents
+
+> 本文件是 qcloop 的完整 AI-facing 参考。读完本文后你应当能独立完成
+> "创建批次 → 启动 → 轮询 → 解读结果 → 决定是否重试"的全流程,不需要
+> 再读其他文件。人类只通过 http://localhost:3000 的 Web 面板监管。
+
+---
+
+## 1. qcloop 是什么
+
+qcloop 是一个**程序驱动的批量测试编排器**。它把"遍历、质检、重试、停
+止"这几个易被 AI 搞错的事情交给程序,AI agent 只负责两件事:
+
+1. **构造一条 prompt 模板** + 一组测试项(items)
+2. **提交给 qcloop** 然后读结果
+
+qcloop 保证:
+- 每个 item 必然被执行,不漏、不重
+- 每次执行后(可选)由独立 verifier 审查;fail 则自动 repair
+- 达到 `max_qc_rounds` 轮仍未通过 → 标记 `exhausted`
+- 超出 `token_budget_per_item` → 提前 `exhausted` 熔断
+- 全部状态落 SQLite,Web 面板实时可见
+
+---
+
+## 2. 何时该用 qcloop
+
+**应当用 qcloop**:
+- 批量同质任务(100 个文件 review / 100 条 SQL 审查 / 100 条文档修订)
+- 有明确 pass/fail 标准(可以写成 verifier prompt)
+- 需要可追溯 / 可复现 / 可审计
+- 担心 AI 自由循环停不下来
+
+**不该用 qcloop**:
+- 单一探索性目标(那个场景用 Codex `/goal`)
+- 每一项的标准都不一样(qcloop 假设 prompt 模板对所有 item 同构)
+- 需要 AI 高度自主、跨 item 状态传递(qcloop 每个 item 独立)
+
+---
+
+## 3. 数据模型
+
+四张 SQLite 表,构成 4 级嵌套:
+
+```
+batch_job (1 个批次)
+ └─ batch_item (N 个测试项)
+     ├─ attempt (1~N 次执行尝试;第 1 次是 worker,后续是 repair)
+     └─ qc_round (0~N 轮质检;verifier 启用时才有)
+```
+
+### 3.1 batch_job
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | string (UUID) | 由 qcloop 生成,**创建时不要传** |
+| name | string | 批次名,给人看 |
+| prompt_template | string | Worker prompt,**必须含 `{{item}}` 占位符** |
+| verifier_prompt_template | string | Verifier prompt,**可用 `{{item}}` 和 `{{output}}`**。输出必须是 JSON `{"pass": bool, "feedback": string}`。留空表示不做质检 |
+| max_qc_rounds | int | 质检+repair 最多轮数,默认 3,达到则 exhausted |
+| token_budget_per_item | int | 单 item token 上限;0 = 不限;超出则 exhausted |
+| execution_mode | string | `"standard"`(默认)或 `"goal_assisted"`(把 prompt 包装成 Goal 风格,让 Codex 在单次 exec 内更收敛) |
+| status | string | `pending` / `running` / `paused` / `completed` / `failed` |
+| created_at | string (RFC3339) | |
+| finished_at | string (RFC3339) | |
+
+### 3.2 batch_item
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | string | |
+| batch_job_id | string | 外键 |
+| item_value | string | 单个测试项的值,会被注入 prompt 的 `{{item}}` |
+| status | string | `pending` / `running` / `success` / `failed` / `exhausted` |
+| current_attempt_no | int | 当前 attempt 编号 |
+| current_qc_no | int | 当前质检轮次 |
+| tokens_used | int | 已消耗 token(累加 worker+repair+verifier) |
+| created_at / finished_at | RFC3339 | |
+
+**终态**:`success`(通过) / `failed`(worker 或 repair 非 0 退出) / `exhausted`(预算或轮次用尽)。
+
+### 3.3 attempt
+
+| 字段 | 说明 |
+|---|---|
+| attempt_no | 1, 2, 3... 同一 item 下唯一 |
+| attempt_type | `worker`(首次)或 `repair`(质检失败后返修) |
+| status | `running` / `success` / `failed` |
+| stdout / stderr / exit_code | 子进程输出 |
+| tokens_used | 本次 token 消耗(CodexExecutor 目前返回 0) |
+
+### 3.4 qc_round
+
+| 字段 | 说明 |
+|---|---|
+| qc_no | 1, 2, 3... 同一 item 下唯一 |
+| status | `running` / `pass` / `fail` |
+| verdict | JSON 字符串,形如 `{"pass": true, "feedback": "..."}` |
+| feedback | 从 verdict.feedback 抽出来的,repair 时会注入 prompt |
+
+---
+
+## 4. HTTP API 完整契约
+
+**Base URL**: `http://localhost:8080/api`(用户运行 `qcloop serve` 后)
+
+所有请求/响应均为 `Content-Type: application/json`。已开启 CORS(`*`)。
+
+### 4.1 POST /api/jobs — 创建批次
+
+请求体:
+```json
+{
+  "name": "string (必填)",
+  "prompt_template": "string (必填,含 {{item}})",
+  "verifier_prompt_template": "string (可选)",
+  "max_qc_rounds": 3,
+  "token_budget_per_item": 0,
+  "execution_mode": "standard",
+  "items": ["item1", "item2", "item3"]
+}
+```
+
+响应 200:
+```json
+{
+  "id": "生成的 UUID",
+  "name": "...",
+  "status": "pending",
+  "created_at": "2026-05-10T12:00:00+08:00",
+  ...
+}
+```
+
+**注意**:创建后 status 是 `pending`,**不会自动执行**。必须再调 `/api/jobs/run`。
+
+### 4.2 POST /api/jobs/run — 启动批次
+
+```json
+{ "job_id": "xxx" }
+```
+
+响应:
+```json
+{ "status": "started" }
+```
+
+后端 goroutine 异步执行,立即返回。通过轮询 `/api/items/` 观察进度。
+
+### 4.3 POST /api/jobs/pause — 暂停
+
+```json
+{ "job_id": "xxx" }
+```
+
+响应 `{ "status": "paused" }`。作用:取消当前 RunBatch 的 context,
+job.status 改为 `paused`。**当前正在跑的那个 item 会继续跑完**,之后的 item 不再启动。
+
+### 4.4 POST /api/jobs/resume — 恢复
+
+```json
+{ "job_id": "xxx" }
+```
+
+响应 `{ "status": "resumed" }`。从未完成的 item(`pending` / `retry_pending`)继续。
+
+### 4.5 GET /api/jobs — 列出所有批次
+
+返回 BatchJob 数组(按 created_at DESC)。
+
+### 4.6 GET /api/jobs/:id — 获取单个批次
+
+返回 BatchJob 对象。
+
+### 4.7 GET /api/items?job_id=xxx — 批次项详情
+
+返回所有 batch_item,**每个 item 嵌套了它的 attempts 和 qc_rounds**:
+
+```json
+[
+  {
+    "id": "item-uuid",
+    "item_value": "item1",
+    "status": "success",
+    "attempts": [
+      { "attempt_no": 1, "attempt_type": "worker", "status": "success", "stdout": "...", ... }
+    ],
+    "qc_rounds": [
+      { "qc_no": 1, "status": "pass", "verdict": "{\"pass\":true,\"feedback\":\"ok\"}", ... }
+    ]
+  }
+]
+```
+
+AI agent 判断单个 item 时应读 `status`,要深入分析失败原因时读 `attempts[*].stderr` 和 `qc_rounds[*].feedback`。
+
+---
+
+## 5. 典型工作流(AI agent 模板)
+
+### 5.1 基础:无质检
+
+```bash
+# 1. 创建批次
+curl -X POST http://localhost:8080/api/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "review-docs",
+    "prompt_template": "Review the markdown file at path {{item}} and fix any inconsistencies.",
+    "items": ["docs/a.md", "docs/b.md", "docs/c.md"],
+    "max_qc_rounds": 3
+  }'
+# -> {"id": "abc-123", ...}
+
+# 2. 启动
+curl -X POST http://localhost:8080/api/jobs/run \
+  -H "Content-Type: application/json" \
+  -d '{"job_id": "abc-123"}'
+
+# 3. 轮询(建议 3~5s 间隔)
+curl "http://localhost:8080/api/items/?job_id=abc-123"
+# 直到所有 item.status 都 ∈ {success, failed, exhausted}
+
+# 4. 读批次聚合状态
+curl http://localhost:8080/api/jobs/abc-123
+# job.status == "completed" 表示批次结束
+```
+
+### 5.2 完整:带质检 + 预算 + Goal 风格
+
+```bash
+curl -X POST http://localhost:8080/api/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "audit-sql-files",
+    "prompt_template": "审计 {{item}} 中的 SQL,修复性能问题,输出 diff。",
+    "verifier_prompt_template": "检查 {{item}} 的修改。如果 EXPLAIN 显示全表扫描,输出 {\"pass\":false,\"feedback\":\"...\"};否则 {\"pass\":true,\"feedback\":\"OK\"}。只输出 JSON。",
+    "items": ["sql/a.sql", "sql/b.sql"],
+    "max_qc_rounds": 3,
+    "token_budget_per_item": 50000,
+    "execution_mode": "goal_assisted"
+  }'
+```
+
+### 5.3 读结果的决策树
+
+拿到 `GET /api/items` 响应后,AI agent 应按以下顺序判断:
+
+```
+for item in items:
+    if item.status == "success":
+        ✅ 完成,使用 item.attempts[-1].stdout 作为产物
+    elif item.status == "exhausted":
+        ⚠️ 质检始终不过或超预算。看 item.qc_rounds[-1].feedback 分析原因。
+            - 如果 feedback 说"任务本身模糊" → 改 prompt_template 重新提单
+            - 如果 feedback 说"需要更多上下文" → 在 prompt 里加更多背景,或拆分 item
+            - 其他 → 调大 max_qc_rounds 或 token_budget_per_item
+    elif item.status == "failed":
+        ❌ worker/repair 进程失败(非 AI 判定失败)。看 item.attempts[-1].stderr。
+            - 常见原因:codex 命令不存在、超时、模型 API 限流
+    elif item.status in ("pending", "running"):
+        ⏳ 还在跑,继续轮询
+```
+
+---
+
+## 6. execution_mode 详解
+
+### standard(默认)
+Runner 直接把 `prompt_template` 里的 `{{item}}` 替换后丢给 `codex exec`。
+
+### goal_assisted
+Runner 会把 prompt 包装成如下结构:
+
+```
+GOAL:
+<job.prompt_template 去掉 {{item}} 后的整体描述>
+
+每次完成后应能通过质检:
+<job.verifier_prompt_template>
+
+TASK:
+<render 后的单 item prompt>
+
+STOP WHEN:
+- 任务明确完成,或
+- 你判断继续迭代也不会改善结果
+
+INSTRUCTIONS:
+- 先简要规划再动手,避免无效循环
+- 在单次响应内尽可能朝目标收敛,但不要做超出 TASK 的修改
+- 完成后给出简短结论;失败时说明卡在哪里
+```
+
+**选择建议**:
+- 任务一次性能完成 → `standard`(省 token)
+- 任务复杂、单次 codex exec 内部需要多步推理 → `goal_assisted`
+- 无论哪种,外层 qcloop 的 `max_qc_rounds` 都继续兜底,不会无限循环
+
+---
+
+## 7. 安全 / 运维边界
+
+- **qcloop 不做沙箱**。它只是调 `codex exec`,codex 自己的 sandbox 设置由用户的 `~/.codex/config.toml` 决定
+- **数据库路径**:默认 `~/.qcloop/qcloop.db`。多个 qcloop 进程共享同一 DB 时,写并发会卡住(当前无 concurrency 支持)
+- **暂停语义**:Pause 只停"未开始的 item",不会中断已开始的 item
+- **崩溃恢复**:当前不支持。进程崩溃后 in-flight item 会卡在 running,需手动改 DB 或删除批次重建
+
+---
+
+## 8. 错误码参考
+
+HTTP 响应状态:
+- `200` 成功
+- `400` 请求体格式错误 / 缺必填字段
+- `404` job_id 不存在
+- `405` Method Not Allowed
+- `500` 服务端错误(DB 错误、codex 命令不存在等)
+
+非 200 时响应体是 `text/plain` 的错误描述,不是 JSON。
+
+---
+
+## 9. 面板 URL 速查
+
+人类监管面板:http://localhost:3000
+
+- 列表页:显示所有批次,状态徽章、创建时间、测试项数
+- 详情页:统计卡片(总数/成功/失败/进行中/待处理/已耗尽)+ 表格
+- 每行可展开查看 attempts 和 qc_rounds 完整历史
+- 右上角 "📥 导出" 可下载 JSON/CSV/Markdown 报告
+- 详情页 "⏸ 暂停" / "▶ 恢复" 按钮手动干预
+
+**AI agent 无需访问面板**,只读 API 即可。
+
+---
+
+## 10. 速查:AI agent checklist
+
+向 qcloop 提单前,检查这 7 点:
+
+1. `prompt_template` 里有且只有 `{{item}}` 占位符
+2. 若配置 `verifier_prompt_template`,它必须返回**单一 JSON 对象**,且有 `pass` 和 `feedback` 两个字段
+3. `items` 数组元素适合被塞进 `{{item}}`(多数情况下是文件路径、ID 或短字符串)
+4. `max_qc_rounds` 合理:通常 2~5。过大浪费 token,过小可能误判
+5. `token_budget_per_item` 合理:代码类任务给 30k~100k,文档类给 10k~30k
+6. 创建后**务必调 `/api/jobs/run`**,不然永远停在 pending
+7. 轮询用 `/api/items/?job_id=xxx`,不要单独 GET 每个 item(后端无此端点)

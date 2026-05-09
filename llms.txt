@@ -1,0 +1,49 @@
+# qcloop
+
+> qcloop 是一个程序驱动的 AI 批量测试编排工具。AI agent 可以通过它的 HTTP API 创建批次、遍历执行、多轮质检,人类只在 Web 面板(http://localhost:3000)监管进度,不必手动提单。
+
+qcloop 的核心价值:**AI agent 负责决定做什么,qcloop 负责保证做到位**。AI 通过 `POST /api/jobs` 提交批次后,qcloop 会:
+- 遍历所有测试项,不漏项、不重复
+- 每项执行后可选调 verifier 质检,失败自动 repair 最多 N 轮
+- 超出 token 预算自动熔断
+- 所有中间状态落 SQLite,Web 面板实时可见
+
+**面向 AI 的工作流**:AI agent 读取本文件 + `llms-full.txt` 后,无需人工介入即可:构建 prompt 模板 → 决定测试项清单 → 调 API 提交 → 轮询状态 → 读详情判断是否重跑。
+
+## Quick Start for AI Agents
+
+- [llms-full.txt](./llms-full.txt): 完整 API 契约 + 端到端示例 + 数据模型,AI agent 要读这份
+- [HTTP API Base](http://localhost:8080/api): 默认 API 地址(用户本地启动 `qcloop serve` 后)
+- [Web Dashboard](http://localhost:3000): 人类监管面板
+
+## Core API Endpoints
+
+- [POST /api/jobs](http://localhost:8080/api/jobs): 创建批次(body: name / prompt_template / verifier_prompt_template / items[] / max_qc_rounds / token_budget_per_item / execution_mode)
+- [GET /api/jobs](http://localhost:8080/api/jobs): 列出所有批次
+- [GET /api/jobs/:id](http://localhost:8080/api/jobs/): 获取单个批次详情
+- [POST /api/jobs/run](http://localhost:8080/api/jobs/run): 启动批次执行(body: job_id)
+- [POST /api/jobs/pause](http://localhost:8080/api/jobs/pause): 暂停执行中的批次
+- [POST /api/jobs/resume](http://localhost:8080/api/jobs/resume): 恢复暂停的批次
+- [GET /api/items?job_id=xxx](http://localhost:8080/api/items/): 获取批次下所有测试项(含 attempts 和 qc_rounds 详情)
+
+## Docs
+
+- [README](./README.md): 人类视角的项目说明、安装、架构
+- [PRD](./docs/PRD.md): 产品需求,含设计哲学(为什么选"程序兜底"而不是"AI 自主")、用户故事、完整字段语义
+- [Goal Integration](./docs/GOAL_INTEGRATION.md): Codex Goal 集成现状,支持 `execution_mode=goal_assisted`
+- [Test Cases](./docs/TEST_CASES.md): 32 个测试用例,每个都含可执行 curl 命令
+- [Quick Test Guide](./docs/QUICK_TEST.md): 5 分钟冒烟测试流程
+
+## Key Concepts
+
+- [batch_job](./docs/PRD.md#31-数据库表): 一个批次,包含 prompt 模板、测试项清单、质检配置
+- [batch_item](./docs/PRD.md#31-数据库表): 批次内的单个测试项,最终状态为 success / failed / exhausted
+- [attempt](./docs/PRD.md#31-数据库表): 单次 worker 或 repair 执行,落 stdout/stderr/exit_code
+- [qc_round](./docs/PRD.md#31-数据库表): 单次 verifier 质检轮次,落 verdict(JSON)+ feedback
+- [execution_mode](./docs/GOAL_INTEGRATION.md): `standard`(原样 prompt)或 `goal_assisted`(包装成 Goal 风格)
+- [token_budget_per_item](./docs/PRD.md#102-半完成需要继续的具体缺口): 单 item token 上限,超出则 exhausted
+
+## Optional
+
+- [Project Summary](./docs/PROJECT_SUMMARY.md): 当前完成度 rollup
+- [GitHub](https://github.com/limecloud/qcloop): 源码
