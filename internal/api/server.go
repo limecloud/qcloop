@@ -20,15 +20,20 @@ type Server struct {
 	mux            *http.ServeMux
 	runningJobs    map[string]context.CancelFunc
 	runningJobsMux sync.RWMutex
+	wsHub          *WSHub
 }
 
 // NewServer 创建 API 服务器
 func NewServer(database *db.DB) *Server {
+	wsHub := NewWSHub()
+	go wsHub.Run()
+
 	s := &Server{
 		database:    database,
 		runner:      core.NewRunner(database),
 		mux:         http.NewServeMux(),
 		runningJobs: make(map[string]context.CancelFunc),
+		wsHub:       wsHub,
 	}
 	s.setupRoutes()
 	return s
@@ -41,6 +46,7 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/jobs/pause", s.handlePauseJob)
 	s.mux.HandleFunc("/api/jobs/resume", s.handleResumeJob)
 	s.mux.HandleFunc("/api/items/", s.handleItems)
+	s.mux.HandleFunc("/ws", s.handleWebSocket)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
