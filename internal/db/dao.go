@@ -9,22 +9,26 @@ import (
 
 // CreateJob 创建批次
 func (db *DB) CreateJob(job *BatchJob) error {
-	query := `INSERT INTO batch_jobs (id, name, prompt_template, status, created_at) VALUES (?, ?, ?, ?, ?)`
-	_, err := db.conn.Exec(query, job.ID, job.Name, job.PromptTemplate, job.Status, job.CreatedAt.Format(time.RFC3339))
+	query := `INSERT INTO batch_jobs (id, name, prompt_template, verifier_prompt_template, max_qc_rounds, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	_, err := db.conn.Exec(query, job.ID, job.Name, job.PromptTemplate, job.VerifierPromptTemplate, job.MaxQCRounds, job.Status, job.CreatedAt.Format(time.RFC3339))
 	return err
 }
 
 // GetJob 获取批次
 func (db *DB) GetJob(id string) (*BatchJob, error) {
-	query := `SELECT id, name, prompt_template, status, created_at, finished_at FROM batch_jobs WHERE id = ?`
+	query := `SELECT id, name, prompt_template, verifier_prompt_template, max_qc_rounds, status, created_at, finished_at FROM batch_jobs WHERE id = ?`
 	job := &BatchJob{}
-	var finishedAt sql.NullString
-	err := db.conn.QueryRow(query, id).Scan(&job.ID, &job.Name, &job.PromptTemplate, &job.Status, &job.CreatedAt, &finishedAt)
+	var createdAt, finishedAt sql.NullString
+	err := db.conn.QueryRow(query, id).Scan(&job.ID, &job.Name, &job.PromptTemplate, &job.VerifierPromptTemplate, &job.MaxQCRounds, &job.Status, &createdAt, &finishedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if createdAt.Valid {
+		t, _ := time.Parse(time.RFC3339, createdAt.String)
+		job.CreatedAt = t
 	}
 	if finishedAt.Valid {
 		t, _ := time.Parse(time.RFC3339, finishedAt.String)
@@ -59,13 +63,17 @@ func (db *DB) CreateItem(item *BatchItem) error {
 func (db *DB) GetItem(id string) (*BatchItem, error) {
 	query := `SELECT id, batch_job_id, item_value, status, current_attempt_no, current_qc_no, created_at, finished_at FROM batch_items WHERE id = ?`
 	item := &BatchItem{}
-	var finishedAt sql.NullString
-	err := db.conn.QueryRow(query, id).Scan(&item.ID, &item.BatchJobID, &item.ItemValue, &item.Status, &item.CurrentAttemptNo, &item.CurrentQCNo, &item.CreatedAt, &finishedAt)
+	var createdAt, finishedAt sql.NullString
+	err := db.conn.QueryRow(query, id).Scan(&item.ID, &item.BatchJobID, &item.ItemValue, &item.Status, &item.CurrentAttemptNo, &item.CurrentQCNo, &createdAt, &finishedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if createdAt.Valid {
+		t, _ := time.Parse(time.RFC3339, createdAt.String)
+		item.CreatedAt = t
 	}
 	if finishedAt.Valid {
 		t, _ := time.Parse(time.RFC3339, finishedAt.String)
@@ -86,10 +94,14 @@ func (db *DB) ListItems(jobID string) ([]*BatchItem, error) {
 	var items []*BatchItem
 	for rows.Next() {
 		item := &BatchItem{}
-		var finishedAt sql.NullString
-		err := rows.Scan(&item.ID, &item.BatchJobID, &item.ItemValue, &item.Status, &item.CurrentAttemptNo, &item.CurrentQCNo, &item.CreatedAt, &finishedAt)
+		var createdAt, finishedAt sql.NullString
+		err := rows.Scan(&item.ID, &item.BatchJobID, &item.ItemValue, &item.Status, &item.CurrentAttemptNo, &item.CurrentQCNo, &createdAt, &finishedAt)
 		if err != nil {
 			return nil, err
+		}
+		if createdAt.Valid {
+			t, _ := time.Parse(time.RFC3339, createdAt.String)
+			item.CreatedAt = t
 		}
 		if finishedAt.Valid {
 			t, _ := time.Parse(time.RFC3339, finishedAt.String)
