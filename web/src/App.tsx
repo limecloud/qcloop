@@ -19,6 +19,12 @@ export function App() {
       try {
         const allJobs = await api.listJobs()
         setJobs(allJobs)
+        // 若当前有正在查看的 job,同步刷新其状态(让暂停/恢复按钮能变化)
+        setCurrentJob((prev) => {
+          if (!prev) return prev
+          const fresh = allJobs.find((j) => j.id === prev.id)
+          return fresh ?? prev
+        })
       } catch (err) {
         console.error('加载批次列表失败:', err)
       }
@@ -45,6 +51,33 @@ export function App() {
       console.error(err)
     }
   }
+
+  const handlePause = async () => {
+    if (!currentJob) return
+    try {
+      await api.pauseJob(currentJob.id)
+      // 本地立刻把按钮切回"可运行"状态,后端的 status=paused 会通过轮询回填
+      setRunning(false)
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  const handleResume = async () => {
+    if (!currentJob) return
+    setRunning(true)
+    try {
+      await api.resumeJob(currentJob.id)
+    } catch (err) {
+      console.error(err)
+      setRunning(false)
+    }
+  }
+
+  // 根据当前 job 的状态决定显示"运行/暂停/恢复"中的哪个主按钮
+  const jobStatus = currentJob?.status
+  const isActive = jobStatus === 'running' || running
+  const isPaused = jobStatus === 'paused'
 
   const stats = {
     total: items.length,
@@ -120,27 +153,61 @@ export function App() {
           <>
             <div style={jobHeaderStyle}>
               <div>
-                <h2 style={{ margin: 0, fontSize: '18px' }}>{currentJob.name}</h2>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <h2 style={{ margin: 0, fontSize: '18px' }}>{currentJob.name}</h2>
+                  <JobStatusBadge status={currentJob.status} />
+                </div>
                 <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#666' }}>
                   批次 ID: {currentJob.id}
                 </p>
               </div>
               <div style={{ display: 'flex', gap: '8px' }}>
-                <button
-                  onClick={handleRun}
-                  disabled={running}
-                  style={{
-                    padding: '8px 16px',
-                    backgroundColor: '#2d7a2d',
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '14px',
-                  }}
-                >
-                  {running ? '运行中...' : '▶ 运行批次'}
-                </button>
+                {isActive ? (
+                  <button
+                    onClick={handlePause}
+                    style={{
+                      padding: '8px 16px',
+                      backgroundColor: '#f57c00',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '14px',
+                    }}
+                  >
+                    ⏸ 暂停
+                  </button>
+                ) : isPaused ? (
+                  <button
+                    onClick={handleResume}
+                    style={{
+                      padding: '8px 16px',
+                      backgroundColor: '#1976d2',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '14px',
+                    }}
+                  >
+                    ▶ 恢复
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleRun}
+                    style={{
+                      padding: '8px 16px',
+                      backgroundColor: '#2d7a2d',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '14px',
+                    }}
+                  >
+                    ▶ 运行批次
+                  </button>
+                )}
                 <ExportMenu job={currentJob} items={items} />
                 <button
                   onClick={() => setCurrentJob(null)}
@@ -214,6 +281,32 @@ export function App() {
         )}
       </div>
     </div>
+  )
+}
+
+// JobStatusBadge 显示批次本身的状态(pending/running/paused/completed/failed)
+function JobStatusBadge({ status }: { status: string }) {
+  const styles: Record<string, { bg: string; color: string; label: string }> = {
+    pending: { bg: '#f5f5f5', color: '#666', label: '待运行' },
+    running: { bg: '#e3f2fd', color: '#1976d2', label: '运行中' },
+    paused: { bg: '#fff4e1', color: '#f57c00', label: '已暂停' },
+    completed: { bg: '#e1ffe1', color: '#2d7a2d', label: '已完成' },
+    failed: { bg: '#ffe1e1', color: '#d32f2f', label: '失败' },
+  }
+  const s = styles[status] || styles.pending
+  return (
+    <span
+      style={{
+        padding: '3px 10px',
+        borderRadius: '10px',
+        backgroundColor: s.bg,
+        color: s.color,
+        fontSize: '12px',
+        fontWeight: 500,
+      }}
+    >
+      {s.label}
+    </span>
   )
 }
 

@@ -41,6 +41,20 @@ export const api = {
       body: JSON.stringify({ job_id: jobId }),
     }),
 
+  // 暂停批次(取消当前在跑的 context)
+  pauseJob: (jobId: string): Promise<{ status: string }> =>
+    request<{ status: string }>('/jobs/pause', {
+      method: 'POST',
+      body: JSON.stringify({ job_id: jobId }),
+    }),
+
+  // 恢复批次(从 pending 的 item 继续跑)
+  resumeJob: (jobId: string): Promise<{ status: string }> =>
+    request<{ status: string }>('/jobs/resume', {
+      method: 'POST',
+      body: JSON.stringify({ job_id: jobId }),
+    }),
+
   // 获取批次项
   listItems: (jobId: string): Promise<BatchItem[]> =>
     request<BatchItem[]>(`/items/?job_id=${jobId}`),

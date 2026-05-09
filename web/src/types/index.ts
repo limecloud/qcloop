@@ -6,7 +6,7 @@ export interface BatchJob {
   prompt_template: string
   verifier_prompt_template: string
   max_qc_rounds: number
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed'
   created_at: string
   finished_at: string | null
 }
