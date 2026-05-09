@@ -251,16 +251,21 @@ func (r *Runner) listAttempts(itemID string) ([]*db.Attempt, error) {
 	var attempts []*db.Attempt
 	for rows.Next() {
 		attempt := &db.Attempt{}
-		var exitCode, finishedAt interface{}
-		if err := rows.Scan(&attempt.ID, &attempt.BatchItemID, &attempt.AttemptNo, &attempt.AttemptType, &attempt.Status, &attempt.Stdout, &attempt.Stderr, &exitCode, &attempt.StartedAt, &finishedAt); err != nil {
+		var exitCode interface{}
+		var startedAt, finishedAt string
+		if err := rows.Scan(&attempt.ID, &attempt.BatchItemID, &attempt.AttemptNo, &attempt.AttemptType, &attempt.Status, &attempt.Stdout, &attempt.Stderr, &exitCode, &startedAt, &finishedAt); err != nil {
 			return nil, err
 		}
 		if exitCode != nil {
 			ec := int(exitCode.(int64))
 			attempt.ExitCode = &ec
 		}
-		if finishedAt != nil {
-			t, _ := time.Parse(time.RFC3339, finishedAt.(string))
+		if startedAt != "" {
+			t, _ := time.Parse(time.RFC3339, startedAt)
+			attempt.StartedAt = t
+		}
+		if finishedAt != "" {
+			t, _ := time.Parse(time.RFC3339, finishedAt)
 			attempt.FinishedAt = &t
 		}
 		attempts = append(attempts, attempt)

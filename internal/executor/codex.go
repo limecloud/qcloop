@@ -25,7 +25,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, prompt string) (stdout, std
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "codex", "exec", "--prompt", prompt)
+	// codex exec 直接接受 prompt 作为参数，不需要 --prompt 标志
+	cmd := exec.CommandContext(ctx, "codex", "exec", prompt)
 
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf

@@ -19,6 +19,10 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  // 列出所有批次
+  listJobs: (): Promise<BatchJob[]> =>
+    request<BatchJob[]>('/jobs'),
+
   // 创建批次
   createJob: (data: CreateJobRequest): Promise<BatchJob> =>
     request<BatchJob>('/jobs', {

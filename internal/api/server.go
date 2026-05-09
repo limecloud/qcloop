@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -141,9 +142,40 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 
 // listJobs 列出所有批次
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
-	// 简化实现：返回空列表
+	query := `SELECT id, name, prompt_template, verifier_prompt_template, max_qc_rounds, status, created_at, finished_at FROM batch_jobs ORDER BY created_at DESC`
+	rows, err := s.database.Conn().Query(query)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var jobs []*db.BatchJob
+	for rows.Next() {
+		job := &db.BatchJob{}
+		var createdAt sql.NullString
+		var finishedAt sql.NullString
+		if err := rows.Scan(&job.ID, &job.Name, &job.PromptTemplate, &job.VerifierPromptTemplate, &job.MaxQCRounds, &job.Status, &createdAt, &finishedAt); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if createdAt.Valid {
+			t, _ := time.Parse(time.RFC3339, createdAt.String)
+			job.CreatedAt = t
+		}
+		if finishedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, finishedAt.String)
+			job.FinishedAt = &t
+		}
+		jobs = append(jobs, job)
+	}
+
+	if jobs == nil {
+		jobs = []*db.BatchJob{}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode([]interface{}{})
+	json.NewEncoder(w).Encode(jobs)
 }
 
 // createJob 创建批次
