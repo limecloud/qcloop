@@ -1,4 +1,4 @@
-import type { BatchJob, BatchItem, CreateJobRequest } from '../types'
+import type { BatchJob, BatchItem, CreateJobRequest, UpdateJobRequest } from '../types'
 
 const API_BASE = '/api'
 
@@ -33,6 +33,19 @@ export const api = {
   // 获取批次
   getJob: (id: string): Promise<BatchJob> =>
     request<BatchJob>(`/jobs/${id}`),
+
+  // 更新批次配置
+  updateJob: (id: string, data: UpdateJobRequest): Promise<BatchJob> =>
+    request<BatchJob>(`/jobs/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  // 删除批次
+  deleteJob: (id: string): Promise<{ status: string }> =>
+    request<{ status: string }>(`/jobs/${id}`, {
+      method: 'DELETE',
+    }),
 
   // 运行批次
   runJob: (jobId: string): Promise<{ status: string }> =>

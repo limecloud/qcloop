@@ -6,12 +6,38 @@ import { api } from './api'
 import type { BatchJob, BatchItem } from './types'
 import { exportToJSON, exportToCSV, exportToMarkdown } from './utils/export'
 
+const JOB_ID_QUERY_KEY = 'job_id'
+
+function readJobIdFromUrl() {
+  return new URLSearchParams(window.location.search).get(JOB_ID_QUERY_KEY)
+}
+
+function writeJobIdToUrl(jobId: string | null) {
+  const url = new URL(window.location.href)
+  if (jobId) {
+    url.searchParams.set(JOB_ID_QUERY_KEY, jobId)
+  } else {
+    url.searchParams.delete(JOB_ID_QUERY_KEY)
+  }
+  window.history.pushState({}, '', `${url.pathname}${url.search}${url.hash}`)
+}
+
 export function App() {
   const [jobs, setJobs] = useState<BatchJob[]>([])
   const [currentJob, setCurrentJob] = useState<BatchJob | null>(null)
+  const [urlJobId, setUrlJobId] = useState(() => readJobIdFromUrl())
   const [showCreateForm, setShowCreateForm] = useState(false)
+  const [editingJob, setEditingJob] = useState<BatchJob | null>(null)
   const [running, setRunning] = useState(false)
   const { items, loading, mode } = useLiveItems(currentJob?.id || '', 3000)
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setUrlJobId(readJobIdFromUrl())
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
 
   // 加载批次列表
   useEffect(() => {
@@ -19,11 +45,13 @@ export function App() {
       try {
         const allJobs = await api.listJobs()
         setJobs(allJobs)
-        // 若当前有正在查看的 job,同步刷新其状态(让暂停/恢复按钮能变化)
+        // URL 是当前详情页的事实源:刷新 / 回退后按 ?job_id= 恢复详情。
         setCurrentJob((prev) => {
-          if (!prev) return prev
-          const fresh = allJobs.find((j) => j.id === prev.id)
-          return fresh ?? prev
+          if (urlJobId) {
+            return allJobs.find((j) => j.id === urlJobId) ?? null
+          }
+          if (!prev) return null
+          return allJobs.find((j) => j.id === prev.id) ?? null
         })
       } catch (err) {
         console.error('加载批次列表失败:', err)
@@ -34,12 +62,50 @@ export function App() {
     // 每 5 秒刷新一次批次列表
     const timer = setInterval(loadJobs, 5000)
     return () => clearInterval(timer)
-  }, [])
+  }, [urlJobId])
 
   const handleCreateJob = (job: BatchJob) => {
     setJobs([...jobs, job])
-    setCurrentJob(job)
+    selectJob(job)
     setShowCreateForm(false)
+  }
+
+  const handleUpdateJob = (job: BatchJob) => {
+    setJobs((prev) => prev.map((item) => (item.id === job.id ? job : item)))
+    setCurrentJob((prev) => (prev?.id === job.id ? job : prev))
+    setEditingJob(null)
+  }
+
+  const handleDeleteJob = async (job: BatchJob) => {
+    if (job.status === 'running') {
+      window.alert('运行中的批次不能删除，请先暂停或等待完成。')
+      return
+    }
+    const confirmed = window.confirm(`确认删除批次「${job.name}」？这会同时删除该批次的执行记录和质检记录。`)
+    if (!confirmed) return
+    try {
+      await api.deleteJob(job.id)
+      setJobs((prev) => prev.filter((item) => item.id !== job.id))
+      setEditingJob((prev) => (prev?.id === job.id ? null : prev))
+      if (currentJob?.id === job.id) {
+        returnToList()
+      }
+    } catch (err) {
+      console.error(err)
+      window.alert(err instanceof Error ? err.message : '删除失败')
+    }
+  }
+
+  const selectJob = (job: BatchJob) => {
+    setCurrentJob(job)
+    setUrlJobId(job.id)
+    writeJobIdToUrl(job.id)
+  }
+
+  const returnToList = () => {
+    setCurrentJob(null)
+    setUrlJobId(null)
+    writeJobIdToUrl(null)
   }
 
   const handleRun = async () => {
@@ -47,8 +113,13 @@ export function App() {
     setRunning(true)
     try {
       await api.runJob(currentJob.id)
+      setCurrentJob((prev) => prev ? { ...prev, status: 'running', finished_at: null } : prev)
+      setJobs((prev) => prev.map((job) => (
+        job.id === currentJob.id ? { ...job, status: 'running', finished_at: null } : job
+      )))
     } catch (err) {
       console.error(err)
+      setRunning(false)
     }
   }
 
@@ -76,8 +147,22 @@ export function App() {
 
   // 根据当前 job 的状态决定显示"运行/暂停/恢复"中的哪个主按钮
   const jobStatus = currentJob?.status
-  const isActive = jobStatus === 'running' || running
+  const isTerminal = jobStatus === 'completed' || jobStatus === 'failed'
+  const isActive = jobStatus === 'running' || (running && !isTerminal)
   const isPaused = jobStatus === 'paused'
+  const runButtonLabel = isTerminal ? '↻ 重新运行批次' : '▶ 运行批次'
+
+  useEffect(() => {
+    if (!currentJob) {
+      setRunning(false)
+      return
+    }
+    if (currentJob.status === 'running') {
+      setRunning(true)
+      return
+    }
+    setRunning(false)
+  }, [currentJob?.id, currentJob?.status])
 
   const stats = {
     total: items.length,
@@ -89,58 +174,73 @@ export function App() {
   }
 
   return (
-    <div style={{ minHeight: '100vh', backgroundColor: '#f5f5f7' }}>
+    <div style={{ minHeight: '100vh', backgroundColor: '#f6f7f9' }}>
       <header
         style={{
-          backgroundColor: '#fff',
-          padding: '16px 24px',
-          borderBottom: '1px solid #e0e0e0',
+          backgroundColor: 'rgba(255,255,255,0.86)',
+          padding: '22px 48px',
+          borderBottom: '1px solid #eceff4',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
+          backdropFilter: 'blur(12px)',
         }}
       >
         <div>
-          <h1 style={{ margin: 0, fontSize: '20px', color: '#333' }}>
+          <h1 style={{ margin: 0, fontSize: '26px', color: '#111827', fontWeight: 800, letterSpacing: '-0.02em' }}>
             qcloop - 批量测试编排工具
           </h1>
-          <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#999' }}>
-            程序驱动的 AI 批量测试执行器
+          <p style={{ margin: '7px 0 0', fontSize: '18px', color: '#7b8190', fontWeight: 500 }}>
+            高密度质检台账 · 程序驱动的 AI 批量测试执行器
           </p>
         </div>
         <button
           onClick={() => setShowCreateForm(true)}
           style={{
-            padding: '8px 16px',
-            backgroundColor: '#1976d2',
+            padding: '12px 20px',
+            backgroundColor: '#111827',
             color: '#fff',
             border: 'none',
-            borderRadius: '4px',
+            borderRadius: '999px',
             cursor: 'pointer',
-            fontSize: '14px',
-            fontWeight: 500,
+            fontSize: '18px',
+            fontWeight: 800,
+            boxShadow: '0 12px 28px rgba(17, 24, 39, 0.16)',
           }}
         >
           + 新建批次
         </button>
       </header>
 
-      <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px' }}>
-        {showCreateForm ? (
-          <div style={modalOverlayStyle} onClick={() => setShowCreateForm(false)}>
+      <div style={{ maxWidth: '2200px', margin: '0 auto', padding: '30px 42px 56px' }}>
+        {showCreateForm || editingJob ? (
+          <div
+            style={modalOverlayStyle}
+            onClick={() => {
+              setShowCreateForm(false)
+              setEditingJob(null)
+            }}
+          >
             <div style={modalContentStyle} onClick={(e) => e.stopPropagation()}>
-              <CreateJobForm onCreated={handleCreateJob} />
+              <CreateJobForm
+                initialJob={editingJob || undefined}
+                onCreated={handleCreateJob}
+                onUpdated={handleUpdateJob}
+              />
               <button
-                onClick={() => setShowCreateForm(false)}
+                onClick={() => {
+                  setShowCreateForm(false)
+                  setEditingJob(null)
+                }}
                 style={{
                   marginTop: '16px',
-                  padding: '8px 16px',
+                  padding: '10px 18px',
                   backgroundColor: '#fff',
                   color: '#666',
                   border: '1px solid #d0d0d0',
                   borderRadius: '4px',
                   cursor: 'pointer',
-                  fontSize: '14px',
+                  fontSize: '18px',
                 }}
               >
                 取消
@@ -154,11 +254,11 @@ export function App() {
             <div style={jobHeaderStyle}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <h2 style={{ margin: 0, fontSize: '18px' }}>{currentJob.name}</h2>
+                  <h2 style={{ margin: 0, fontSize: '26px', color: '#111827', fontWeight: 800, letterSpacing: '-0.02em' }}>{currentJob.name}</h2>
                   <JobStatusBadge status={currentJob.status} />
                   <LiveModeBadge mode={mode} />
                 </div>
-                <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#666' }}>
+                <p style={{ margin: '6px 0 0', fontSize: '18px', color: '#6b7280', fontWeight: 500 }}>
                   批次 ID: {currentJob.id}
                 </p>
               </div>
@@ -167,13 +267,13 @@ export function App() {
                   <button
                     onClick={handlePause}
                     style={{
-                      padding: '8px 16px',
+                      padding: '10px 18px',
                       backgroundColor: '#f57c00',
                       color: '#fff',
                       border: 'none',
                       borderRadius: '4px',
                       cursor: 'pointer',
-                      fontSize: '14px',
+                      fontSize: '18px',
                     }}
                   >
                     ⏸ 暂停
@@ -182,13 +282,13 @@ export function App() {
                   <button
                     onClick={handleResume}
                     style={{
-                      padding: '8px 16px',
+                      padding: '10px 18px',
                       backgroundColor: '#1976d2',
                       color: '#fff',
                       border: 'none',
                       borderRadius: '4px',
                       cursor: 'pointer',
-                      fontSize: '14px',
+                      fontSize: '18px',
                     }}
                   >
                     ▶ 恢复
@@ -197,29 +297,60 @@ export function App() {
                   <button
                     onClick={handleRun}
                     style={{
-                      padding: '8px 16px',
+                      padding: '10px 18px',
                       backgroundColor: '#2d7a2d',
                       color: '#fff',
                       border: 'none',
                       borderRadius: '4px',
                       cursor: 'pointer',
-                      fontSize: '14px',
+                      fontSize: '18px',
                     }}
                   >
-                    ▶ 运行批次
+                    {runButtonLabel}
                   </button>
                 )}
                 <ExportMenu job={currentJob} items={items} />
                 <button
-                  onClick={() => setCurrentJob(null)}
+                  onClick={() => setEditingJob(currentJob)}
+                  disabled={currentJob.status === 'running'}
                   style={{
-                    padding: '8px 16px',
+                    padding: '10px 18px',
+                    backgroundColor: currentJob.status === 'running' ? '#f3f4f6' : '#fff',
+                    color: currentJob.status === 'running' ? '#9ca3af' : '#374151',
+                    border: '1px solid #d0d0d0',
+                    borderRadius: '4px',
+                    cursor: currentJob.status === 'running' ? 'not-allowed' : 'pointer',
+                    fontSize: '18px',
+                  }}
+                >
+                  编辑
+                </button>
+                <button
+                  onClick={() => handleDeleteJob(currentJob)}
+                  disabled={currentJob.status === 'running'}
+                  style={{
+                    padding: '10px 18px',
+                    backgroundColor: currentJob.status === 'running' ? '#f3f4f6' : '#fff1f2',
+                    color: currentJob.status === 'running' ? '#9ca3af' : '#b91c1c',
+                    border: '1px solid #fecdd3',
+                    borderRadius: '4px',
+                    cursor: currentJob.status === 'running' ? 'not-allowed' : 'pointer',
+                    fontSize: '18px',
+                    fontWeight: 700,
+                  }}
+                >
+                  删除
+                </button>
+                <button
+                  onClick={returnToList}
+                  style={{
+                    padding: '10px 18px',
                     backgroundColor: '#fff',
                     color: '#666',
                     border: '1px solid #d0d0d0',
                     borderRadius: '4px',
                     cursor: 'pointer',
-                    fontSize: '14px',
+                    fontSize: '18px',
                   }}
                 >
                   返回列表
@@ -249,7 +380,7 @@ export function App() {
         ) : (
           <div style={tableContainerStyle}>
             <div style={{ padding: '24px' }}>
-              <h3 style={{ margin: '0 0 16px', fontSize: '16px', color: '#333' }}>
+              <h3 style={{ margin: '0 0 18px', fontSize: '26px', color: '#111827', fontWeight: 800, letterSpacing: '-0.02em' }}>
                 批次列表
               </h3>
               {jobs.length === 0 ? (
@@ -272,7 +403,13 @@ export function App() {
                   </thead>
                   <tbody>
                     {jobs.map((job) => (
-                      <JobRow key={job.id} job={job} onSelect={setCurrentJob} />
+                      <JobRow
+                        key={job.id}
+                        job={job}
+                        onSelect={selectJob}
+                        onEdit={setEditingJob}
+                        onDelete={handleDeleteJob}
+                      />
                     ))}
                   </tbody>
                 </table>
@@ -298,12 +435,12 @@ function JobStatusBadge({ status }: { status: string }) {
   return (
     <span
       style={{
-        padding: '3px 10px',
-        borderRadius: '10px',
+        padding: '5px 14px',
+        borderRadius: '999px',
         backgroundColor: s.bg,
         color: s.color,
-        fontSize: '12px',
-        fontWeight: 500,
+        fontSize: '18px',
+        fontWeight: 700,
       }}
     >
       {s.label}
@@ -315,22 +452,33 @@ function StatCard({ label, value, color }: { label: string; value: number; color
   return (
     <div
       style={{
-        padding: '16px',
-        backgroundColor: '#fff',
-        borderRadius: '8px',
-        boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+        padding: '8px 18px',
+        backgroundColor: 'transparent',
+        borderRadius: '16px',
+        border: 'none',
+        boxShadow: 'none',
         flex: 1,
       }}
     >
-      <div style={{ fontSize: '13px', color: '#666' }}>{label}</div>
-      <div style={{ fontSize: '24px', fontWeight: 600, color, marginTop: '4px' }}>
+      <div style={{ fontSize: '18px', color: '#7b8190', fontWeight: 700 }}>{label}</div>
+      <div style={{ fontSize: '26px', fontWeight: 800, color, marginTop: '4px', letterSpacing: '-0.02em' }}>
         {value}
       </div>
     </div>
   )
 }
 
-function JobRow({ job, onSelect }: { job: BatchJob; onSelect: (job: BatchJob) => void }) {
+function JobRow({
+  job,
+  onSelect,
+  onEdit,
+  onDelete,
+}: {
+  job: BatchJob
+  onSelect: (job: BatchJob) => void
+  onEdit: (job: BatchJob) => void
+  onDelete: (job: BatchJob) => void
+}) {
   const [itemCount, setItemCount] = useState<number>(0)
 
   useEffect(() => {
@@ -370,7 +518,7 @@ function JobRow({ job, onSelect }: { job: BatchJob; onSelect: (job: BatchJob) =>
         <div style={{ fontWeight: 500, color: '#333' }}>{job.name}</div>
       </td>
       <td style={tdStyle}>
-        <code style={{ fontSize: '11px', color: '#666', backgroundColor: '#f5f5f5', padding: '2px 6px', borderRadius: '3px' }}>
+        <code style={{ fontSize: '18px', color: '#666', backgroundColor: '#f5f5f5', padding: '3px 8px', borderRadius: '6px' }}>
           {job.id.substring(0, 8)}...
         </code>
       </td>
@@ -381,8 +529,8 @@ function JobRow({ job, onSelect }: { job: BatchJob; onSelect: (job: BatchJob) =>
             borderRadius: '12px',
             backgroundColor: statusStyle.bg,
             color: statusStyle.color,
-            fontSize: '12px',
-            fontWeight: 500,
+            fontSize: '18px',
+            fontWeight: 700,
           }}
         >
           {getStatusLabel(job.status)}
@@ -395,7 +543,7 @@ function JobRow({ job, onSelect }: { job: BatchJob; onSelect: (job: BatchJob) =>
         <span style={{ color: '#666' }}>最多 {job.max_qc_rounds} 轮</span>
       </td>
       <td style={tdStyle}>
-        <span style={{ fontSize: '13px', color: '#666' }}>
+        <span style={{ fontSize: '18px', color: '#666' }}>
           {new Date(job.created_at).toLocaleString('zh-CN', {
             year: 'numeric',
             month: '2-digit',
@@ -407,7 +555,7 @@ function JobRow({ job, onSelect }: { job: BatchJob; onSelect: (job: BatchJob) =>
       </td>
       <td style={tdStyle}>
         {job.finished_at ? (
-          <span style={{ fontSize: '13px', color: '#666' }}>
+          <span style={{ fontSize: '18px', color: '#666' }}>
             {new Date(job.finished_at).toLocaleString('zh-CN', {
               year: 'numeric',
               month: '2-digit',
@@ -417,25 +565,59 @@ function JobRow({ job, onSelect }: { job: BatchJob; onSelect: (job: BatchJob) =>
             })}
           </span>
         ) : (
-          <span style={{ fontSize: '13px', color: '#999' }}>-</span>
+          <span style={{ fontSize: '18px', color: '#999' }}>-</span>
         )}
       </td>
       <td style={tdStyle}>
-        <button
-          onClick={() => onSelect(job)}
-          style={{
-            padding: '6px 16px',
-            backgroundColor: '#1976d2',
-            color: '#fff',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '13px',
-            fontWeight: 500,
-          }}
-        >
-          查看详情
-        </button>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => onSelect(job)}
+            style={{
+              padding: '10px 18px',
+              backgroundColor: '#1976d2',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '18px',
+              fontWeight: 700,
+            }}
+          >
+            查看详情
+          </button>
+          <button
+            onClick={() => onEdit(job)}
+            disabled={job.status === 'running'}
+            style={{
+              padding: '10px 18px',
+              backgroundColor: job.status === 'running' ? '#f3f4f6' : '#fff',
+              color: job.status === 'running' ? '#9ca3af' : '#374151',
+              border: '1px solid #d0d0d0',
+              borderRadius: '4px',
+              cursor: job.status === 'running' ? 'not-allowed' : 'pointer',
+              fontSize: '18px',
+              fontWeight: 700,
+            }}
+          >
+            编辑
+          </button>
+          <button
+            onClick={() => onDelete(job)}
+            disabled={job.status === 'running'}
+            style={{
+              padding: '10px 18px',
+              backgroundColor: job.status === 'running' ? '#f3f4f6' : '#fff1f2',
+              color: job.status === 'running' ? '#9ca3af' : '#b91c1c',
+              border: '1px solid #fecdd3',
+              borderRadius: '4px',
+              cursor: job.status === 'running' ? 'not-allowed' : 'pointer',
+              fontSize: '18px',
+              fontWeight: 700,
+            }}
+          >
+            删除
+          </button>
+        </div>
       </td>
     </tr>
   )
@@ -445,23 +627,30 @@ const jobHeaderStyle: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'space-between',
-  padding: '16px 24px',
+  padding: '20px 26px',
   backgroundColor: '#fff',
-  borderRadius: '8px',
-  boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-  marginBottom: '16px',
+  borderRadius: '24px',
+  border: '1px solid #edf1f5',
+  boxShadow: '0 14px 36px rgba(15, 23, 42, 0.045)',
+  marginBottom: '18px',
 }
 
 const statsStyle: React.CSSProperties = {
   display: 'flex',
-  gap: '12px',
-  marginBottom: '16px',
+  gap: '0',
+  padding: '10px 12px',
+  backgroundColor: '#fff',
+  border: '1px solid #edf1f5',
+  borderRadius: '24px',
+  boxShadow: '0 14px 36px rgba(15, 23, 42, 0.04)',
+  marginBottom: '18px',
 }
 
 const tableContainerStyle: React.CSSProperties = {
   backgroundColor: '#fff',
-  borderRadius: '8px',
-  boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+  borderRadius: '30px',
+  border: '1px solid rgba(15, 23, 42, 0.045)',
+  boxShadow: '0 28px 78px rgba(15, 23, 42, 0.075)',
   overflow: 'hidden',
 }
 
@@ -489,16 +678,17 @@ const modalContentStyle: React.CSSProperties = {
 }
 
 const thStyle: React.CSSProperties = {
-  padding: '12px 16px',
+  padding: '18px 16px',
   textAlign: 'left',
-  fontWeight: 500,
-  color: '#333',
-  fontSize: '13px',
+  fontWeight: 800,
+  color: '#111827',
+  fontSize: '20px',
 }
 
 const tdStyle: React.CSSProperties = {
-  padding: '12px 16px',
+  padding: '16px',
   verticalAlign: 'middle',
+  fontSize: '18px',
 }
 
 function ExportMenu({ job, items }: { job: BatchJob; items: BatchItem[] }) {
@@ -509,13 +699,13 @@ function ExportMenu({ job, items }: { job: BatchJob; items: BatchItem[] }) {
       <button
         onClick={() => setShowMenu(!showMenu)}
         style={{
-          padding: '8px 16px',
+          padding: '10px 18px',
           backgroundColor: '#fff',
           color: '#666',
           border: '1px solid #d0d0d0',
           borderRadius: '4px',
           cursor: 'pointer',
-          fontSize: '14px',
+          fontSize: '18px',
         }}
       >
         📥 导出
@@ -560,7 +750,7 @@ function ExportMenu({ job, items }: { job: BatchJob; items: BatchItem[] }) {
                 border: 'none',
                 backgroundColor: 'transparent',
                 cursor: 'pointer',
-                fontSize: '14px',
+                fontSize: '16px',
                 color: '#333',
               }}
               onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f5f5f5')}
@@ -581,7 +771,7 @@ function ExportMenu({ job, items }: { job: BatchJob; items: BatchItem[] }) {
                 border: 'none',
                 backgroundColor: 'transparent',
                 cursor: 'pointer',
-                fontSize: '14px',
+                fontSize: '16px',
                 color: '#333',
               }}
               onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f5f5f5')}
@@ -602,7 +792,7 @@ function ExportMenu({ job, items }: { job: BatchJob; items: BatchItem[] }) {
                 border: 'none',
                 backgroundColor: 'transparent',
                 cursor: 'pointer',
-                fontSize: '14px',
+                fontSize: '16px',
                 color: '#333',
                 borderTop: '1px solid #e0e0e0',
               }}
@@ -630,12 +820,12 @@ function LiveModeBadge({ mode }: { mode: 'ws' | 'polling' | 'idle' }) {
     <span
       title={mode === 'ws' ? 'WebSocket 已连接,状态毫秒级更新' : 'WS 不可用,已降级为 3s 轮询兜底'}
       style={{
-        padding: '3px 10px',
-        borderRadius: '10px',
+        padding: '5px 14px',
+        borderRadius: '999px',
         backgroundColor: s.bg,
         color: s.color,
-        fontSize: '11px',
-        fontWeight: 500,
+        fontSize: '18px',
+        fontWeight: 700,
       }}
     >
       {s.label}

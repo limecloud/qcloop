@@ -20,6 +20,7 @@ export interface BatchItem {
   status: 'pending' | 'running' | 'success' | 'failed' | 'exhausted'
   current_attempt_no: number
   current_qc_no: number
+  tokens_used: number
   created_at: string
   finished_at: string | null
   attempts: Attempt[]
@@ -35,6 +36,7 @@ export interface Attempt {
   stdout: string
   stderr: string
   exit_code: number | null
+  tokens_used: number
   started_at: string
   finished_at: string | null
 }
@@ -46,6 +48,7 @@ export interface QCRound {
   status: 'running' | 'pass' | 'fail'
   verdict: string
   feedback: string
+  tokens_used: number
   started_at: string
   finished_at: string | null
 }
@@ -58,4 +61,13 @@ export interface CreateJobRequest {
   token_budget_per_item?: number
   execution_mode?: string // "standard" | "goal_assisted"
   items: string[]
+}
+
+export interface UpdateJobRequest {
+  name: string
+  prompt_template: string
+  verifier_prompt_template?: string
+  max_qc_rounds?: number
+  token_budget_per_item?: number
+  execution_mode?: string // "standard" | "goal_assisted"
 }

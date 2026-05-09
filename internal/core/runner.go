@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -89,21 +90,67 @@ func (r *Runner) emitJobUpdate(jobID string) {
 
 // setItemStatus 更新 item 状态并广播。集中一处避免忘记广播。
 func (r *Runner) setItemStatus(jobID, itemID, status string) error {
-	if err := r.database.UpdateItemStatus(itemID, status); err != nil {
+	var err error
+	switch status {
+	case "success", "failed", "exhausted":
+		err = r.database.FinishItem(itemID, status)
+	default:
+		err = r.database.UpdateItemStatus(itemID, status)
+	}
+	if err != nil {
 		return err
 	}
 	r.emitItemUpdate(jobID, itemID)
 	return nil
 }
 
-// RunBatch 运行批次
-func (r *Runner) RunBatch(ctx context.Context, jobID string) error {
+// PrepareRun 同步把批次切到"本次运行"起点。
+//
+// API 会在返回前调用它,保证用户点击"重新运行"后立刻看到:
+// - job.status=running,finished_at 清空
+// - terminal 批次的 item 回到 pending/running 队列
+// - 历史 attempts/qc_rounds 保留,但当前轮计数归零
+func (r *Runner) PrepareRun(jobID string) (*db.BatchJob, []*db.BatchItem, error) {
 	job, err := r.database.GetJob(jobID)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	if job == nil {
-		return fmt.Errorf("批次不存在")
+		return nil, nil, fmt.Errorf("批次不存在")
+	}
+
+	items, err := r.database.ListItems(jobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	shouldRerun := shouldRerunCompletedJob(job, items)
+
+	if err := r.database.StartJob(jobID); err != nil {
+		return nil, nil, err
+	}
+	r.emitJobUpdate(jobID)
+
+	if shouldRerun {
+		if err := r.database.ResetItemsForRerun(jobID); err != nil {
+			return nil, nil, err
+		}
+		items, err = r.database.ListItems(jobID)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, item := range items {
+			r.emitItemUpdate(jobID, item.ID)
+		}
+	}
+
+	return job, items, nil
+}
+
+// RunBatch 运行批次
+func (r *Runner) RunBatch(ctx context.Context, jobID string) error {
+	job, items, err := r.PrepareRun(jobID)
+	if err != nil {
+		return err
 	}
 
 	// 根据 execution_mode 决定本次 Batch 用什么 executor。
@@ -111,16 +158,6 @@ func (r *Runner) RunBatch(ctx context.Context, jobID string) error {
 	// 其他(含空值):直接用基础 executor。
 	r.activeExec = r.buildActiveExecutor(job)
 	defer func() { r.activeExec = nil }()
-
-	if err := r.database.UpdateJobStatus(jobID, "running"); err != nil {
-		return err
-	}
-	r.emitJobUpdate(jobID)
-
-	items, err := r.database.ListItems(jobID)
-	if err != nil {
-		return err
-	}
 
 	for _, item := range items {
 		if item.Status != "pending" {
@@ -139,10 +176,32 @@ func (r *Runner) RunBatch(ctx context.Context, jobID string) error {
 	return nil
 }
 
+func shouldRerunCompletedJob(job *db.BatchJob, items []*db.BatchItem) bool {
+	if job.Status != "completed" && job.Status != "failed" {
+		return false
+	}
+	if len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		if item.Status == "pending" || item.Status == "running" {
+			return false
+		}
+	}
+	return true
+}
+
 // processItem 处理单个 item
 func (r *Runner) processItem(ctx context.Context, job *db.BatchJob, item *db.BatchItem) error {
+	if err := r.setItemStatus(job.ID, item.ID, "running"); err != nil {
+		return err
+	}
+
 	// 执行 worker
-	attemptNo := 1
+	attemptNo, err := r.nextAttemptNo(item.ID)
+	if err != nil {
+		return err
+	}
 	attempt, err := r.executeWorker(ctx, job, item, attemptNo, "worker")
 	if err != nil {
 		return err
@@ -158,7 +217,11 @@ func (r *Runner) processItem(ctx context.Context, job *db.BatchJob, item *db.Bat
 	}
 
 	// 执行多轮质检
-	return r.runQCLoop(ctx, job, item, attemptNo)
+	startQCNo, err := r.nextQCNo(item.ID)
+	if err != nil {
+		return err
+	}
+	return r.runQCLoop(ctx, job, item, attemptNo, startQCNo)
 }
 
 // runOne 统一封装 executor 调用,返回 Result(含 tokens)。
@@ -211,7 +274,10 @@ func (r *Runner) chargeItemTokens(itemID string, delta int) (int, error) {
 // executeWorker 执行 worker 或 repair
 func (r *Runner) executeWorker(ctx context.Context, job *db.BatchJob, item *db.BatchItem, attemptNo int, attemptType string) (*db.Attempt, error) {
 	prompt := strings.ReplaceAll(job.PromptTemplate, "{{item}}", item.ItemValue)
+	return r.executeWorkerPrompt(ctx, prompt, item, attemptNo, attemptType)
+}
 
+func (r *Runner) executeWorkerPrompt(ctx context.Context, prompt string, item *db.BatchItem, attemptNo int, attemptType string) (*db.Attempt, error) {
 	attempt := &db.Attempt{
 		ID:          db.GenerateID(),
 		BatchItemID: item.ID,
@@ -255,10 +321,11 @@ func (r *Runner) executeWorker(ctx context.Context, job *db.BatchJob, item *db.B
 }
 
 // runQCLoop 运行质检循环
-func (r *Runner) runQCLoop(ctx context.Context, job *db.BatchJob, item *db.BatchItem, startAttemptNo int) error {
+func (r *Runner) runQCLoop(ctx context.Context, job *db.BatchJob, item *db.BatchItem, startAttemptNo, startQCNo int) error {
 	attemptNo := startAttemptNo
 
-	for qcNo := 1; qcNo <= job.MaxQCRounds; qcNo++ {
+	for offset := 0; offset < job.MaxQCRounds; offset++ {
+		qcNo := startQCNo + offset
 		// 每轮开始检查 token 预算
 		if exceeded, err := r.checkBudgetExceeded(job, item); err != nil {
 			return err
@@ -278,7 +345,7 @@ func (r *Runner) runQCLoop(ctx context.Context, job *db.BatchJob, item *db.Batch
 		}
 
 		// 质检失败
-		if qcNo >= job.MaxQCRounds {
+		if offset >= job.MaxQCRounds-1 {
 			// 达到最大轮次
 			return r.setItemStatus(job.ID, item.ID, "exhausted")
 		}
@@ -317,6 +384,34 @@ func (r *Runner) checkBudgetExceeded(job *db.BatchJob, item *db.BatchItem) (bool
 		return false, err
 	}
 	return used >= job.TokenBudgetPerItem, nil
+}
+
+func (r *Runner) nextAttemptNo(itemID string) (int, error) {
+	attempts, err := r.listAttempts(itemID)
+	if err != nil {
+		return 0, err
+	}
+	maxNo := 0
+	for _, attempt := range attempts {
+		if attempt.AttemptNo > maxNo {
+			maxNo = attempt.AttemptNo
+		}
+	}
+	return maxNo + 1, nil
+}
+
+func (r *Runner) nextQCNo(itemID string) (int, error) {
+	rounds, err := r.listQCRounds(itemID)
+	if err != nil {
+		return 0, err
+	}
+	maxNo := 0
+	for _, round := range rounds {
+		if round.QCNo > maxNo {
+			maxNo = round.QCNo
+		}
+	}
+	return maxNo + 1, nil
 }
 
 // executeVerifier 执行 verifier
@@ -393,13 +488,16 @@ func (r *Runner) executeRepair(ctx context.Context, job *db.BatchJob, item *db.B
 	prompt := strings.ReplaceAll(job.PromptTemplate, "{{item}}", item.ItemValue)
 	prompt = fmt.Sprintf("%s\n\n质检反馈：%s\n请根据反馈修复问题。", prompt, feedback)
 
-	return r.executeWorker(ctx, job, item, attemptNo, "repair")
+	return r.executeWorkerPrompt(ctx, prompt, item, attemptNo, "repair")
 }
 
 // 数据库操作辅助方法
 func (r *Runner) createAttempt(attempt *db.Attempt) error {
 	query := `INSERT INTO attempts (id, batch_item_id, attempt_no, attempt_type, status, started_at) VALUES (?, ?, ?, ?, ?, ?)`
-	_, err := r.database.Conn().Exec(query, attempt.ID, attempt.BatchItemID, attempt.AttemptNo, attempt.AttemptType, attempt.Status, attempt.StartedAt.Format(time.RFC3339))
+	if _, err := r.database.Conn().Exec(query, attempt.ID, attempt.BatchItemID, attempt.AttemptNo, attempt.AttemptType, attempt.Status, attempt.StartedAt.Format(time.RFC3339)); err != nil {
+		return err
+	}
+	_, err := r.database.Conn().Exec(`UPDATE batch_items SET current_attempt_no = current_attempt_no + 1 WHERE id = ?`, attempt.BatchItemID)
 	return err
 }
 
@@ -414,7 +512,7 @@ func (r *Runner) updateAttempt(attempt *db.Attempt) error {
 }
 
 func (r *Runner) listAttempts(itemID string) ([]*db.Attempt, error) {
-	query := `SELECT id, batch_item_id, attempt_no, attempt_type, status, stdout, stderr, exit_code, started_at, finished_at FROM attempts WHERE batch_item_id = ? ORDER BY attempt_no`
+	query := `SELECT id, batch_item_id, attempt_no, attempt_type, status, stdout, stderr, exit_code, tokens_used, started_at, finished_at FROM attempts WHERE batch_item_id = ? ORDER BY attempt_no`
 	rows, err := r.database.Conn().Query(query, itemID)
 	if err != nil {
 		return nil, err
@@ -424,21 +522,27 @@ func (r *Runner) listAttempts(itemID string) ([]*db.Attempt, error) {
 	var attempts []*db.Attempt
 	for rows.Next() {
 		attempt := &db.Attempt{}
-		var exitCode interface{}
-		var startedAt, finishedAt string
-		if err := rows.Scan(&attempt.ID, &attempt.BatchItemID, &attempt.AttemptNo, &attempt.AttemptType, &attempt.Status, &attempt.Stdout, &attempt.Stderr, &exitCode, &startedAt, &finishedAt); err != nil {
+		var stdout, stderr, startedAt, finishedAt sql.NullString
+		var exitCode sql.NullInt64
+		if err := rows.Scan(&attempt.ID, &attempt.BatchItemID, &attempt.AttemptNo, &attempt.AttemptType, &attempt.Status, &stdout, &stderr, &exitCode, &attempt.TokensUsed, &startedAt, &finishedAt); err != nil {
 			return nil, err
 		}
-		if exitCode != nil {
-			ec := int(exitCode.(int64))
+		if stdout.Valid {
+			attempt.Stdout = stdout.String
+		}
+		if stderr.Valid {
+			attempt.Stderr = stderr.String
+		}
+		if exitCode.Valid {
+			ec := int(exitCode.Int64)
 			attempt.ExitCode = &ec
 		}
-		if startedAt != "" {
-			t, _ := time.Parse(time.RFC3339, startedAt)
+		if startedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, startedAt.String)
 			attempt.StartedAt = t
 		}
-		if finishedAt != "" {
-			t, _ := time.Parse(time.RFC3339, finishedAt)
+		if finishedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, finishedAt.String)
 			attempt.FinishedAt = &t
 		}
 		attempts = append(attempts, attempt)
@@ -448,7 +552,10 @@ func (r *Runner) listAttempts(itemID string) ([]*db.Attempt, error) {
 
 func (r *Runner) createQCRound(qc *db.QCRound) error {
 	query := `INSERT INTO qc_rounds (id, batch_item_id, qc_no, status, started_at) VALUES (?, ?, ?, ?, ?)`
-	_, err := r.database.Conn().Exec(query, qc.ID, qc.BatchItemID, qc.QCNo, qc.Status, qc.StartedAt.Format(time.RFC3339))
+	if _, err := r.database.Conn().Exec(query, qc.ID, qc.BatchItemID, qc.QCNo, qc.Status, qc.StartedAt.Format(time.RFC3339)); err != nil {
+		return err
+	}
+	_, err := r.database.Conn().Exec(`UPDATE batch_items SET current_qc_no = current_qc_no + 1 WHERE id = ?`, qc.BatchItemID)
 	return err
 }
 
@@ -475,16 +582,22 @@ func (r *Runner) listQCRounds(itemID string) ([]*db.QCRound, error) {
 	var rounds []*db.QCRound
 	for rows.Next() {
 		round := &db.QCRound{}
-		var startedAt, finishedAt string
-		if err := rows.Scan(&round.ID, &round.BatchItemID, &round.QCNo, &round.Status, &round.Verdict, &round.Feedback, &round.TokensUsed, &startedAt, &finishedAt); err != nil {
+		var verdict, feedback, startedAt, finishedAt sql.NullString
+		if err := rows.Scan(&round.ID, &round.BatchItemID, &round.QCNo, &round.Status, &verdict, &feedback, &round.TokensUsed, &startedAt, &finishedAt); err != nil {
 			return nil, err
 		}
-		if startedAt != "" {
-			t, _ := time.Parse(time.RFC3339, startedAt)
+		if verdict.Valid {
+			round.Verdict = verdict.String
+		}
+		if feedback.Valid {
+			round.Feedback = feedback.String
+		}
+		if startedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, startedAt.String)
 			round.StartedAt = t
 		}
-		if finishedAt != "" {
-			t, _ := time.Parse(time.RFC3339, finishedAt)
+		if finishedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, finishedAt.String)
 			round.FinishedAt = &t
 		}
 		rounds = append(rounds, round)

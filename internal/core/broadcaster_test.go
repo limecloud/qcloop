@@ -52,8 +52,8 @@ func (f *fakeBroadcaster) jobIDs() []string {
 	return out
 }
 
-// 注入 broadcaster 后,无 verifier 情况下每个 item 至少产生两次广播:
-// 一次 attempt 落库(成功),一次终态(success)。整个 RunBatch 还会广播
+// 注入 broadcaster 后,无 verifier 情况下每个 item 至少产生三次广播:
+// 一次 item 进入 running,一次 attempt 落库(成功),一次终态(success)。整个 RunBatch 还会广播
 // 两次 job 状态(running → completed)。
 func TestBroadcaster_NoVerifier_EmitsOnAttemptAndTerminal(t *testing.T) {
 	database := newTestDB(t)
@@ -71,9 +71,9 @@ func TestBroadcaster_NoVerifier_EmitsOnAttemptAndTerminal(t *testing.T) {
 		t.Fatalf("RunBatch: %v", err)
 	}
 
-	// 2 items × (1 attempt + 1 终态) = 4 次 item 广播
-	if got := bc.itemCallCount(); got != 4 {
-		t.Errorf("item broadcast count = %d, want 4", got)
+	// 2 items × (running + 1 attempt + 1 终态) = 6 次 item 广播
+	if got := bc.itemCallCount(); got != 6 {
+		t.Errorf("item broadcast count = %d, want 6", got)
 	}
 	// job 状态:running(开始) + completed(结束) = 2 次
 	if got := bc.jobCallCount(); got != 2 {
@@ -87,14 +87,16 @@ func TestBroadcaster_NoVerifier_EmitsOnAttemptAndTerminal(t *testing.T) {
 }
 
 // 有 verifier 首轮通过:每个 item 的广播流应为:
-//   worker attempt → qc_round → item 终态 success
-// 共 3 次 item 广播。
-func TestBroadcaster_VerifierFirstPass_EmitsThreeTimesPerItem(t *testing.T) {
+//
+//	item running → worker attempt → qc_round → item 终态 success
+//
+// 共 4 次 item 广播。
+func TestBroadcaster_VerifierFirstPass_EmitsFourTimesPerItem(t *testing.T) {
 	database := newTestDB(t)
 	jobID := makeJob(t, database, "verify", 3, []string{"x"})
 
 	exec := executor.NewFakeExecutor(
-		executor.FakeResponse{Stdout: "done", ExitCode: 0},                // worker
+		executor.FakeResponse{Stdout: "done", ExitCode: 0},                          // worker
 		executor.FakeResponse{Stdout: `{"pass":true,"feedback":"ok"}`, ExitCode: 0}, // verifier
 	)
 	r := NewRunnerWithExecutor(database, exec)
@@ -105,8 +107,8 @@ func TestBroadcaster_VerifierFirstPass_EmitsThreeTimesPerItem(t *testing.T) {
 		t.Fatalf("RunBatch: %v", err)
 	}
 
-	if got := bc.itemCallCount(); got != 3 {
-		t.Errorf("item broadcast count = %d, want 3 (worker+qc+terminal)", got)
+	if got := bc.itemCallCount(); got != 4 {
+		t.Errorf("item broadcast count = %d, want 4 (running+worker+qc+terminal)", got)
 	}
 }
 

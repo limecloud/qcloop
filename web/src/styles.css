@@ -2,13 +2,19 @@
   box-sizing: border-box;
 }
 
+:root {
+  --qc-font-sans: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Noto Sans CJK SC', sans-serif;
+  --qc-font-mono: 'SF Mono', Menlo, Consolas, monospace;
+}
+
 body {
   margin: 0;
   padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
-    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-family: var(--qc-font-sans);
   font-size: 14px;
   color: #333;
+  font-feature-settings: 'tnum';
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -32,7 +38,7 @@ textarea:focus {
   border-color: #1976d2;
 }
 
-/* 表格悬停效果 */
+/* 列表悬停只做轻提示，避免台账表变成后台管理表。 */
 tbody tr:hover {
-  background-color: #fafafa;
+  background-color: #fbfcfe;
 }

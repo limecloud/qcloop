@@ -162,6 +162,13 @@ func TestRunBatch_Verifier_RepairThenPass(t *testing.T) {
 	if fake.CallCount() != 6 {
 		t.Errorf("want 6 calls (1 worker + 2 repair + 3 verifier), got %d", fake.CallCount())
 	}
+	calls := fake.Calls()
+	if !strings.Contains(calls[2].Prompt, "质检反馈：fix x") {
+		t.Errorf("repair prompt missing qc feedback: %q", calls[2].Prompt)
+	}
+	if !strings.Contains(calls[4].Prompt, "质检反馈：fix y") {
+		t.Errorf("second repair prompt missing qc feedback: %q", calls[4].Prompt)
+	}
 
 	items, _ := database.ListItems(jobID)
 	if items[0].Status != "success" {
@@ -192,6 +199,126 @@ func TestRunBatch_Verifier_Exhausted(t *testing.T) {
 	items, _ := database.ListItems(jobID)
 	if items[0].Status != "exhausted" {
 		t.Errorf("want exhausted after %d rounds, got %s", maxRounds, items[0].Status)
+	}
+}
+
+func TestRunBatch_CompletedJobRerunsAllItemsAndAppendsHistory(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, `check {{item}}`, 1, []string{"again"})
+
+	fake := executor.NewFakeExecutor(
+		executor.FakeResponse{Stdout: "first worker", ExitCode: 0},
+		executor.FakeResponse{Stdout: `{"pass": true, "feedback": "ok first"}`, ExitCode: 0},
+		executor.FakeResponse{Stdout: "second worker", ExitCode: 0},
+		executor.FakeResponse{Stdout: `{"pass": true, "feedback": "ok second"}`, ExitCode: 0},
+	)
+	runner := NewRunnerWithExecutor(database, fake)
+
+	if err := runner.RunBatch(context.Background(), jobID); err != nil {
+		t.Fatalf("first RunBatch: %v", err)
+	}
+	job, _ := database.GetJob(jobID)
+	firstFinishedAt := job.FinishedAt
+	if firstFinishedAt == nil {
+		t.Fatal("first run should set finished_at")
+	}
+
+	if err := runner.RunBatch(context.Background(), jobID); err != nil {
+		t.Fatalf("second RunBatch: %v", err)
+	}
+	if fake.CallCount() != 4 {
+		t.Fatalf("want 4 calls after rerun, got %d", fake.CallCount())
+	}
+
+	items, _ := database.ListItems(jobID)
+	if len(items) != 1 {
+		t.Fatalf("want 1 item, got %d", len(items))
+	}
+	if items[0].Status != "success" {
+		t.Fatalf("item status = %s, want success", items[0].Status)
+	}
+	if items[0].CurrentAttemptNo != 1 {
+		t.Fatalf("current_attempt_no = %d, want 1", items[0].CurrentAttemptNo)
+	}
+	if items[0].CurrentQCNo != 1 {
+		t.Fatalf("current_qc_no = %d, want 1", items[0].CurrentQCNo)
+	}
+	if items[0].FinishedAt == nil {
+		t.Fatal("rerun success should set item finished_at")
+	}
+
+	attempts, err := runner.listAttempts(items[0].ID)
+	if err != nil {
+		t.Fatalf("list attempts: %v", err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("want 2 attempts preserved, got %d", len(attempts))
+	}
+	if attempts[0].AttemptNo != 1 || attempts[1].AttemptNo != 2 {
+		t.Fatalf("attempt numbers = %d/%d, want 1/2", attempts[0].AttemptNo, attempts[1].AttemptNo)
+	}
+
+	rounds, err := runner.listQCRounds(items[0].ID)
+	if err != nil {
+		t.Fatalf("list qc rounds: %v", err)
+	}
+	if len(rounds) != 2 {
+		t.Fatalf("want 2 qc rounds preserved, got %d", len(rounds))
+	}
+	if rounds[0].QCNo != 1 || rounds[1].QCNo != 2 {
+		t.Fatalf("qc numbers = %d/%d, want 1/2", rounds[0].QCNo, rounds[1].QCNo)
+	}
+}
+
+func TestPrepareRun_CompletedJobResetsVisibleItemStateBeforeWorkerStarts(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, `check {{item}}`, 1, []string{"again"})
+
+	fake := executor.NewFakeExecutor(
+		executor.FakeResponse{Stdout: "first worker", ExitCode: 0},
+		executor.FakeResponse{Stdout: `{"pass": true, "feedback": "ok first"}`, ExitCode: 0},
+	)
+	runner := NewRunnerWithExecutor(database, fake)
+
+	if err := runner.RunBatch(context.Background(), jobID); err != nil {
+		t.Fatalf("first RunBatch: %v", err)
+	}
+
+	_, preparedItems, err := runner.PrepareRun(jobID)
+	if err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	if len(preparedItems) != 1 {
+		t.Fatalf("want 1 prepared item, got %d", len(preparedItems))
+	}
+	if preparedItems[0].Status != "pending" {
+		t.Fatalf("prepared item status = %s, want pending", preparedItems[0].Status)
+	}
+	if preparedItems[0].CurrentAttemptNo != 0 || preparedItems[0].CurrentQCNo != 0 {
+		t.Fatalf("prepared current counters = %d/%d, want 0/0", preparedItems[0].CurrentAttemptNo, preparedItems[0].CurrentQCNo)
+	}
+	if preparedItems[0].FinishedAt != nil {
+		t.Fatal("prepared item finished_at should be cleared")
+	}
+
+	job, _ := database.GetJob(jobID)
+	if job.Status != "running" {
+		t.Fatalf("prepared job status = %s, want running", job.Status)
+	}
+	if job.FinishedAt != nil {
+		t.Fatal("prepared job finished_at should be cleared")
+	}
+
+	attempts, err := runner.listAttempts(preparedItems[0].ID)
+	if err != nil {
+		t.Fatalf("list attempts: %v", err)
+	}
+	rounds, err := runner.listQCRounds(preparedItems[0].ID)
+	if err != nil {
+		t.Fatalf("list qc rounds: %v", err)
+	}
+	if len(attempts) != 1 || len(rounds) != 1 {
+		t.Fatalf("history should be preserved, got attempts=%d qc=%d", len(attempts), len(rounds))
 	}
 }
 

@@ -3,17 +3,22 @@ import { api } from '../api'
 import type { BatchJob } from '../types'
 
 interface Props {
-  onCreated: (job: BatchJob) => void
+  onCreated?: (job: BatchJob) => void
+  onUpdated?: (job: BatchJob) => void
+  initialJob?: BatchJob
 }
 
-export function CreateJobForm({ onCreated }: Props) {
-  const [name, setName] = useState('')
-  const [promptTemplate, setPromptTemplate] = useState('')
-  const [verifierPrompt, setVerifierPrompt] = useState('')
+export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
+  const editing = Boolean(initialJob)
+  const [name, setName] = useState(initialJob?.name || '')
+  const [promptTemplate, setPromptTemplate] = useState(initialJob?.prompt_template || '')
+  const [verifierPrompt, setVerifierPrompt] = useState(initialJob?.verifier_prompt_template || '')
   const [items, setItems] = useState('')
-  const [maxQCRounds, setMaxQCRounds] = useState(3)
-  const [tokenBudget, setTokenBudget] = useState(0)
-  const [executionMode, setExecutionMode] = useState<'standard' | 'goal_assisted'>('standard')
+  const [maxQCRounds, setMaxQCRounds] = useState(initialJob?.max_qc_rounds || 3)
+  const [tokenBudget, setTokenBudget] = useState(initialJob?.token_budget_per_item || 0)
+  const [executionMode, setExecutionMode] = useState<'standard' | 'goal_assisted'>(
+    initialJob?.execution_mode === 'goal_assisted' ? 'goal_assisted' : 'standard',
+  )
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -23,17 +28,25 @@ export function CreateJobForm({ onCreated }: Props) {
     setError(null)
 
     try {
-      const itemList = items.split(',').map((s) => s.trim()).filter(Boolean)
-      const job = await api.createJob({
+      const payload = {
         name,
         prompt_template: promptTemplate,
         verifier_prompt_template: verifierPrompt || undefined,
         max_qc_rounds: maxQCRounds,
         token_budget_per_item: tokenBudget || undefined,
         execution_mode: executionMode,
-        items: itemList,
-      })
-      onCreated(job)
+      }
+      if (editing && initialJob) {
+        const job = await api.updateJob(initialJob.id, payload)
+        onUpdated?.(job)
+      } else {
+        const itemList = items.split(',').map((s) => s.trim()).filter(Boolean)
+        const job = await api.createJob({
+          ...payload,
+          items: itemList,
+        })
+        onCreated?.(job)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
@@ -43,7 +56,7 @@ export function CreateJobForm({ onCreated }: Props) {
 
   return (
     <form onSubmit={handleSubmit} style={formStyle}>
-      <h2 style={{ marginTop: 0, color: '#333' }}>创建批次</h2>
+      <h2 style={{ marginTop: 0, color: '#333' }}>{editing ? '编辑批次' : '创建批次'}</h2>
 
       <div style={fieldStyle}>
         <label style={labelStyle}>批次名称 *</label>
@@ -80,17 +93,19 @@ export function CreateJobForm({ onCreated }: Props) {
         />
       </div>
 
-      <div style={fieldStyle}>
-        <label style={labelStyle}>测试项列表（逗号分隔）*</label>
-        <input
-          type="text"
-          value={items}
-          onChange={(e) => setItems(e.target.value)}
-          required
-          style={inputStyle}
-          placeholder="item1,item2,item3"
-        />
-      </div>
+      {!editing && (
+        <div style={fieldStyle}>
+          <label style={labelStyle}>测试项列表（逗号分隔）*</label>
+          <input
+            type="text"
+            value={items}
+            onChange={(e) => setItems(e.target.value)}
+            required
+            style={inputStyle}
+            placeholder="item1,item2,item3"
+          />
+        </div>
+      )}
 
       <div style={fieldStyle}>
         <label style={labelStyle}>最大质检轮次</label>
@@ -134,7 +149,7 @@ export function CreateJobForm({ onCreated }: Props) {
       )}
 
       <button type="submit" disabled={submitting} style={buttonStyle}>
-        {submitting ? '创建中...' : '创建批次'}
+        {submitting ? (editing ? '保存中...' : '创建中...') : (editing ? '保存修改' : '创建批次')}
       </button>
     </form>
   )
