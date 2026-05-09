@@ -352,53 +352,50 @@ running -> pass
 
 ```mermaid
 graph TB
-    subgraph "CLI Layer"
-        CLI[CLI Commands]
+    subgraph "用户交互层"
+        CLI[CLI 命令]
+        GUI[Web GUI<br/>批次表格视图]
     end
     
-    subgraph "Core Layer"
-        Dispatcher[Dispatcher<br/>串行调度器]
-        StateMachine[State Machine<br/>状态机]
-        Recovery[Recovery<br/>崩溃恢复]
+    subgraph "编排层"
+        BatchManager[批次管理器<br/>创建/查询/恢复]
+        Dispatcher[调度器<br/>逐个 claim item]
+        Recovery[恢复器<br/>扫描过期 lease]
     end
     
-    subgraph "Executor Layer"
-        ExecutorInterface[Executor Interface]
-        CodexExecutor[Codex Executor]
-        FakeExecutor[Fake Executor]
+    subgraph "执行层"
+        Worker[Worker 执行器<br/>首次执行]
+        Verifier[Verifier 质检器<br/>质检1/2/3...]
+        Repair[Repair 返修器<br/>在原 thread 续跑]
     end
     
-    subgraph "QC Layer"
-        Verifier[Verifier<br/>质检器]
-        Verdict[Verdict Parser<br/>判定解析]
+    subgraph "存储层"
+        DAO[DAO 层]
+        DB[(SQLite<br/>batch_jobs<br/>batch_items<br/>attempts<br/>qc_rounds<br/>artifacts)]
     end
     
-    subgraph "Data Layer"
-        DAO[DAO Layer]
-        DB[(SQLite Database)]
-    end
+    CLI --> BatchManager
+    GUI --> BatchManager
     
-    CLI --> Dispatcher
-    CLI --> Recovery
+    BatchManager --> Dispatcher
+    BatchManager --> Recovery
     
-    Dispatcher --> StateMachine
-    Dispatcher --> ExecutorInterface
-    Dispatcher --> DAO
+    Dispatcher --> Worker
+    Worker --> Verifier
+    Verifier -->|pass| DAO
+    Verifier -->|fail| Repair
+    Repair --> Verifier
     
-    ExecutorInterface --> CodexExecutor
-    ExecutorInterface --> FakeExecutor
-    
-    CodexExecutor --> Verifier
-    Verifier --> Verdict
-    
-    StateMachine --> DAO
     Recovery --> DAO
+    Dispatcher --> DAO
     DAO --> DB
     
     style CLI fill:#e1f5ff
+    style GUI fill:#e1f5ff
     style Dispatcher fill:#fff4e1
-    style ExecutorInterface fill:#f0e1ff
+    style Worker fill:#f0e1ff
     style Verifier fill:#e1ffe1
+    style Repair fill:#ffe1f0
     style DB fill:#ffe1e1
 ```
 
