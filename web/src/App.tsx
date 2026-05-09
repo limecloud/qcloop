@@ -3,7 +3,8 @@ import { CreateJobForm } from './components/CreateJobForm'
 import { BatchTable } from './components/BatchTable'
 import { usePollingItems } from './hooks/usePollingItems'
 import { api } from './api'
-import type { BatchJob } from './types'
+import type { BatchJob, BatchItem } from './types'
+import { exportToJSON, exportToCSV, exportToMarkdown } from './utils/export'
 
 export function App() {
   const [jobs, setJobs] = useState<BatchJob[]>([])
@@ -140,6 +141,7 @@ export function App() {
                 >
                   {running ? '运行中...' : '▶ 运行批次'}
                 </button>
+                <ExportMenu job={currentJob} items={items} />
                 <button
                   onClick={() => setCurrentJob(null)}
                   style={{
@@ -403,4 +405,121 @@ const thStyle: React.CSSProperties = {
 const tdStyle: React.CSSProperties = {
   padding: '12px 16px',
   verticalAlign: 'middle',
+}
+
+function ExportMenu({ job, items }: { job: BatchJob; items: BatchItem[] }) {
+  const [showMenu, setShowMenu] = useState(false)
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        onClick={() => setShowMenu(!showMenu)}
+        style={{
+          padding: '8px 16px',
+          backgroundColor: '#fff',
+          color: '#666',
+          border: '1px solid #d0d0d0',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          fontSize: '14px',
+        }}
+      >
+        📥 导出
+      </button>
+      {showMenu && (
+        <>
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              zIndex: 999,
+            }}
+            onClick={() => setShowMenu(false)}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              top: '100%',
+              right: 0,
+              marginTop: '4px',
+              backgroundColor: '#fff',
+              border: '1px solid #d0d0d0',
+              borderRadius: '4px',
+              boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+              zIndex: 1000,
+              minWidth: '150px',
+            }}
+          >
+            <button
+              onClick={() => {
+                exportToJSON(job, items)
+                setShowMenu(false)
+              }}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '10px 16px',
+                textAlign: 'left',
+                border: 'none',
+                backgroundColor: 'transparent',
+                cursor: 'pointer',
+                fontSize: '14px',
+                color: '#333',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f5f5f5')}
+              onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+            >
+              导出为 JSON
+            </button>
+            <button
+              onClick={() => {
+                exportToCSV(job, items)
+                setShowMenu(false)
+              }}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '10px 16px',
+                textAlign: 'left',
+                border: 'none',
+                backgroundColor: 'transparent',
+                cursor: 'pointer',
+                fontSize: '14px',
+                color: '#333',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f5f5f5')}
+              onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+            >
+              导出为 CSV
+            </button>
+            <button
+              onClick={() => {
+                exportToMarkdown(job, items)
+                setShowMenu(false)
+              }}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '10px 16px',
+                textAlign: 'left',
+                border: 'none',
+                backgroundColor: 'transparent',
+                cursor: 'pointer',
+                fontSize: '14px',
+                color: '#333',
+                borderTop: '1px solid #e0e0e0',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f5f5f5')}
+              onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+            >
+              导出为 Markdown
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
 }
