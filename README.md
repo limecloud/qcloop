@@ -47,7 +47,7 @@ Codex CLI 0.128.0 新增的 `/goal` 是官方版 Ralph loop,和 qcloop 解决的
 | API 稳定性 | experimental(文档未收录) | 稳定可用 |
 | 最适场景 | 单目标探索 | 批量同质任务 |
 
-**一句话**:单目标探索用 Goal,批量任务用 qcloop。详细对比见 [PRD 1.4 节](docs/PRD_SIMPLE.md#14-设计哲学为什么选择-程序兜底-而不是-ai-自主)。
+**一句话**:单目标探索用 Goal,批量任务用 qcloop。详细对比见 [PRD 1.4 节](docs/PRD.md#14-设计哲学为什么选择-程序兜底-而不是-ai-自主)。
 
 ## 🎯 功能特性
 
@@ -380,8 +380,7 @@ qcloop/
 │   ├── tsconfig.json
 │   └── vite.config.ts
 ├── docs/                    # 文档
-│   ├── PRD.md               # 完整 PRD
-│   ├── PRD_SIMPLE.md        # 精简版 PRD（含用户故事）
+│   ├── PRD.md               # 产品需求文档（含设计哲学、用户故事）
 │   ├── TEST_CASES.md        # 测试用例（32 个测试点）
 │   ├── QUICK_TEST.md        # 快速测试指南
 │   ├── GOAL_INTEGRATION.md  # Codex Goal 集成方案
@@ -432,8 +431,7 @@ qcloop/
 
 ## 📖 文档
 
-- [完整 PRD 文档](docs/PRD.md) - 产品需求文档
-- [精简版 PRD](docs/PRD_SIMPLE.md) - 含用户故事和界面设计
+- [产品需求文档 (PRD)](docs/PRD.md) - 含设计哲学、用户故事、界面设计
 - [测试用例文档](docs/TEST_CASES.md) - 32 个详细测试用例
 - [快速测试指南](docs/QUICK_TEST.md) - 5 分钟快速测试
 - [Codex Goal 集成方案](docs/GOAL_INTEGRATION.md) - 未来功能规划

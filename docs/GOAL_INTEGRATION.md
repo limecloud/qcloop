@@ -1,5 +1,23 @@
 # Codex Goal 功能集成方案
 
+> **状态**:本文档是设计稿,尚未实现。
+>
+> **暂缓原因**(2026-05):Codex `/goal` 在 CLI 0.128.0 刚引入(2026-04-30),
+> 属于 experimental 特性——官方 slash-command 文档未收录、app-server
+> `thread/goal/*` RPC 标注为 experimental、社区报告 `/goal` 在 0.128.0 存在
+> 已知 bug([Issue #20591](https://github.com/openai/codex/issues/20591))、
+> 容易烧 token([Issue #14593](https://github.com/openai/codex/issues/14593))。
+>
+> **下一步触发条件**:当满足以下任一条件时启动真实集成:
+> 1. `/goal` 从 experimental 转正,官方文档收录
+> 2. app-server 提供稳定的 `max_rounds` 参数(硬停止),补齐当前只有 token
+>    budget 软停止的缺陷
+> 3. 有明确用户需求需要"单目标自主迭代"语义
+>
+> **临时策略**:qcloop 的多轮质检循环(worker + verifier + repair)已经
+> 在"可控边界内"实现了类 Goal 的语义,且停止条件是 `max_qc_rounds` 硬停
+> 止,可用性已超过 experimental 的 /goal。详见 `PRD.md` 1.4 节。
+
 ## 概述
 
 Codex 的 goal 功能允许设置一个持久化的目标，Codex 会自主循环执行直到达成目标。这与 qcloop 的多轮质检理念完美契合。
