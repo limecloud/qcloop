@@ -294,9 +294,14 @@ worker -> verifier -> repair -> verifier -> ...
 - PRD + README 对齐 Codex /goal 定位差异
 
 ### 🔶 半完成(下一刀真实缺口)
-1. **WebSocket 前端对接** — 后端 Hub 好了,前端还在 2s 轮询
-2. **暂停/恢复 UI** — 后端 API 在,列表/详情页没按钮
-3. **Token 预算真实扣减** — schema 和 model 字段有,Runner 未读未扣未熔断
+
+当前无半完成项。历史登记过的 WebSocket 对接、暂停/恢复 UI、Token
+预算扣减已在 2026-05-10 全部闭环。
+
+### 历史技术债(全部已清)
+1. ~~前端轮询未切 WebSocket~~ → useLiveItems WS+轮询兜底
+2. ~~token 预算是 schema-only~~ → Runner 真实扣减+熔断
+3. ~~暂停/恢复无 UI 入口~~ → 详情页三态按钮 + 状态徽章
 
 ### ⏳ 未开始
 - Codex `/goal` 集成:暂缓,等 /goal 从 experimental 转正

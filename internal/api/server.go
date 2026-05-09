@@ -28,9 +28,12 @@ func NewServer(database *db.DB) *Server {
 	wsHub := NewWSHub()
 	go wsHub.Run()
 
+	runner := core.NewRunner(database)
+	runner.SetBroadcaster(wsHub)
+
 	s := &Server{
 		database:    database,
-		runner:      core.NewRunner(database),
+		runner:      runner,
 		mux:         http.NewServeMux(),
 		runningJobs: make(map[string]context.CancelFunc),
 		wsHub:       wsHub,
@@ -167,6 +170,9 @@ func (s *Server) handlePauseJob(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if job, _ := s.database.GetJob(req.JobID); job != nil {
+			s.wsHub.BroadcastJobUpdate(req.JobID, job)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -195,6 +201,9 @@ func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
 	if err := s.database.UpdateJobStatus(req.JobID, "running"); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if job, _ := s.database.GetJob(req.JobID); job != nil {
+		s.wsHub.BroadcastJobUpdate(req.JobID, job)
 	}
 
 	// 在后台继续运行批次

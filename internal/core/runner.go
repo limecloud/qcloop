@@ -11,6 +11,17 @@ import (
 	"github.com/coso/qcloop/internal/executor"
 )
 
+// EventBroadcaster 是 Runner 用来推实时事件的 seam。
+// internal/api.WSHub 实现了这个接口;测试可传 nil。
+//
+// 为什么定义在 core 而不是 api:
+//   - 避免 core → api 反向依赖(api 已经 import core.Runner)
+//   - 测试时注入 nil 或 fake,核心流程不依赖 WebSocket 实现
+type EventBroadcaster interface {
+	BroadcastItemUpdate(jobID, itemID string, data interface{})
+	BroadcastJobUpdate(jobID string, data interface{})
+}
+
 // Runner 批次执行器
 type Runner struct {
 	database *db.DB
@@ -18,6 +29,8 @@ type Runner struct {
 	// activeExec 仅在一次 RunBatch 生命周期内使用:若 job.ExecutionMode 为
 	// goal_assisted,则包上 GoalAssistedExecutor;否则 == executor。
 	activeExec executor.Executor
+	// broadcaster 可为 nil;非 nil 时 Runner 会在关键事件推 WebSocket
+	broadcaster EventBroadcaster
 }
 
 // NewRunner 创建执行器(默认使用 CodexExecutor)
@@ -34,6 +47,53 @@ func NewRunnerWithExecutor(database *db.DB, exec executor.Executor) *Runner {
 		database: database,
 		executor: exec,
 	}
+}
+
+// SetBroadcaster 注入事件广播器。传 nil 可关闭广播(默认行为)。
+// 调用时机:api.Server 构造时注入 WSHub。
+func (r *Runner) SetBroadcaster(b EventBroadcaster) {
+	r.broadcaster = b
+}
+
+// emitItemUpdate 非阻塞广播单个 item 的最新快照。
+// broadcaster 为 nil 时无操作,测试/CLI 路径不受影响。
+// payload 从 DB 重读,避免广播陈旧数据。
+func (r *Runner) emitItemUpdate(jobID, itemID string) {
+	if r.broadcaster == nil {
+		return
+	}
+	item, err := r.database.GetItem(itemID)
+	if err != nil || item == nil {
+		return
+	}
+	attempts, _ := r.listAttempts(itemID)
+	qcRounds, _ := r.listQCRounds(itemID)
+	r.broadcaster.BroadcastItemUpdate(jobID, itemID, map[string]interface{}{
+		"item":      item,
+		"attempts":  attempts,
+		"qc_rounds": qcRounds,
+	})
+}
+
+// emitJobUpdate 非阻塞广播 job 状态
+func (r *Runner) emitJobUpdate(jobID string) {
+	if r.broadcaster == nil {
+		return
+	}
+	job, err := r.database.GetJob(jobID)
+	if err != nil || job == nil {
+		return
+	}
+	r.broadcaster.BroadcastJobUpdate(jobID, job)
+}
+
+// setItemStatus 更新 item 状态并广播。集中一处避免忘记广播。
+func (r *Runner) setItemStatus(jobID, itemID, status string) error {
+	if err := r.database.UpdateItemStatus(itemID, status); err != nil {
+		return err
+	}
+	r.emitItemUpdate(jobID, itemID)
+	return nil
 }
 
 // RunBatch 运行批次
@@ -55,6 +115,7 @@ func (r *Runner) RunBatch(ctx context.Context, jobID string) error {
 	if err := r.database.UpdateJobStatus(jobID, "running"); err != nil {
 		return err
 	}
+	r.emitJobUpdate(jobID)
 
 	items, err := r.database.ListItems(jobID)
 	if err != nil {
@@ -71,7 +132,11 @@ func (r *Runner) RunBatch(ctx context.Context, jobID string) error {
 		}
 	}
 
-	return r.database.FinishJob(jobID, "completed")
+	if err := r.database.FinishJob(jobID, "completed"); err != nil {
+		return err
+	}
+	r.emitJobUpdate(jobID)
+	return nil
 }
 
 // processItem 处理单个 item
@@ -89,7 +154,7 @@ func (r *Runner) processItem(ctx context.Context, job *db.BatchJob, item *db.Bat
 		if attempt.Status != "success" {
 			status = "failed"
 		}
-		return r.database.UpdateItemStatus(item.ID, status)
+		return r.setItemStatus(job.ID, item.ID, status)
 	}
 
 	// 执行多轮质检
@@ -183,6 +248,9 @@ func (r *Runner) executeWorker(ctx context.Context, job *db.BatchJob, item *db.B
 		return nil, err
 	}
 
+	// 每次 attempt 落库后广播,前端立刻看到"首次/质检 N"标签增长
+	r.emitItemUpdate(item.BatchJobID, item.ID)
+
 	return attempt, nil
 }
 
@@ -195,7 +263,7 @@ func (r *Runner) runQCLoop(ctx context.Context, job *db.BatchJob, item *db.Batch
 		if exceeded, err := r.checkBudgetExceeded(job, item); err != nil {
 			return err
 		} else if exceeded {
-			return r.database.UpdateItemStatus(item.ID, "exhausted")
+			return r.setItemStatus(job.ID, item.ID, "exhausted")
 		}
 
 		// 执行 verifier
@@ -206,20 +274,20 @@ func (r *Runner) runQCLoop(ctx context.Context, job *db.BatchJob, item *db.Batch
 
 		if qcRound.Status == "pass" {
 			// 质检通过
-			return r.database.UpdateItemStatus(item.ID, "success")
+			return r.setItemStatus(job.ID, item.ID, "success")
 		}
 
 		// 质检失败
 		if qcNo >= job.MaxQCRounds {
 			// 达到最大轮次
-			return r.database.UpdateItemStatus(item.ID, "exhausted")
+			return r.setItemStatus(job.ID, item.ID, "exhausted")
 		}
 
 		// 执行 repair 前再检查一次(verifier 本身可能已超预算)
 		if exceeded, err := r.checkBudgetExceeded(job, item); err != nil {
 			return err
 		} else if exceeded {
-			return r.database.UpdateItemStatus(item.ID, "exhausted")
+			return r.setItemStatus(job.ID, item.ID, "exhausted")
 		}
 
 		// 执行 repair
@@ -231,7 +299,7 @@ func (r *Runner) runQCLoop(ctx context.Context, job *db.BatchJob, item *db.Batch
 
 		if repairAttempt.Status != "success" {
 			// repair 失败，标记为 failed
-			return r.database.UpdateItemStatus(item.ID, "failed")
+			return r.setItemStatus(job.ID, item.ID, "failed")
 		}
 	}
 
@@ -314,6 +382,9 @@ func (r *Runner) executeVerifier(ctx context.Context, job *db.BatchJob, item *db
 		return nil, err
 	}
 
+	// qc_round 落库后立即广播,质检标签实时刷新
+	r.emitItemUpdate(item.BatchJobID, item.ID)
+
 	return qcRound, nil
 }
 
@@ -389,4 +460,34 @@ func (r *Runner) updateQCRound(qc *db.QCRound) error {
 	}
 	_, err := r.database.Conn().Exec(query, qc.Status, qc.Verdict, qc.Feedback, qc.TokensUsed, finishedAt, qc.ID)
 	return err
+}
+
+// listQCRounds 拉取单个 item 的所有质检轮次(按 qc_no 升序)。
+// 被 emitItemUpdate 用作广播 payload 的一部分。
+func (r *Runner) listQCRounds(itemID string) ([]*db.QCRound, error) {
+	query := `SELECT id, batch_item_id, qc_no, status, verdict, feedback, tokens_used, started_at, finished_at FROM qc_rounds WHERE batch_item_id = ? ORDER BY qc_no`
+	rows, err := r.database.Conn().Query(query, itemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rounds []*db.QCRound
+	for rows.Next() {
+		round := &db.QCRound{}
+		var startedAt, finishedAt string
+		if err := rows.Scan(&round.ID, &round.BatchItemID, &round.QCNo, &round.Status, &round.Verdict, &round.Feedback, &round.TokensUsed, &startedAt, &finishedAt); err != nil {
+			return nil, err
+		}
+		if startedAt != "" {
+			t, _ := time.Parse(time.RFC3339, startedAt)
+			round.StartedAt = t
+		}
+		if finishedAt != "" {
+			t, _ := time.Parse(time.RFC3339, finishedAt)
+			round.FinishedAt = &t
+		}
+		rounds = append(rounds, round)
+	}
+	return rounds, rows.Err()
 }

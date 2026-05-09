@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { CreateJobForm } from './components/CreateJobForm'
 import { BatchTable } from './components/BatchTable'
-import { usePollingItems } from './hooks/usePollingItems'
+import { useLiveItems } from './hooks/useLiveItems'
 import { api } from './api'
 import type { BatchJob, BatchItem } from './types'
 import { exportToJSON, exportToCSV, exportToMarkdown } from './utils/export'
@@ -11,7 +11,7 @@ export function App() {
   const [currentJob, setCurrentJob] = useState<BatchJob | null>(null)
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [running, setRunning] = useState(false)
-  const { items, loading } = usePollingItems(currentJob?.id || '', 2000)
+  const { items, loading, mode } = useLiveItems(currentJob?.id || '', 3000)
 
   // 加载批次列表
   useEffect(() => {
@@ -156,6 +156,7 @@ export function App() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                   <h2 style={{ margin: 0, fontSize: '18px' }}>{currentJob.name}</h2>
                   <JobStatusBadge status={currentJob.status} />
+                  <LiveModeBadge mode={mode} />
                 </div>
                 <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#666' }}>
                   批次 ID: {currentJob.id}
@@ -614,5 +615,30 @@ function ExportMenu({ job, items }: { job: BatchJob; items: BatchItem[] }) {
         </>
       )}
     </div>
+  )
+}
+
+// LiveModeBadge 显示当前实时推送的连接模式:WS 或 polling
+function LiveModeBadge({ mode }: { mode: 'ws' | 'polling' | 'idle' }) {
+  if (mode === 'idle') return null
+  const styles = {
+    ws: { bg: '#e1ffe1', color: '#2d7a2d', label: '● 实时' },
+    polling: { bg: '#fff4e1', color: '#f57c00', label: '○ 轮询' },
+  }
+  const s = styles[mode]
+  return (
+    <span
+      title={mode === 'ws' ? 'WebSocket 已连接,状态毫秒级更新' : 'WS 不可用,已降级为 3s 轮询兜底'}
+      style={{
+        padding: '3px 10px',
+        borderRadius: '10px',
+        backgroundColor: s.bg,
+        color: s.color,
+        fontSize: '11px',
+        fontWeight: 500,
+      }}
+    >
+      {s.label}
+    </span>
   )
 }

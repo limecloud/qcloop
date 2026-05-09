@@ -802,21 +802,23 @@ npm run dev
 - [x] RESTful `/api/jobs` CRUD
 - [x] `POST /api/jobs/run` 后台运行
 - [x] `POST /api/jobs/pause` + `POST /api/jobs/resume`
-- [x] WebSocket Hub(`/ws`),支持按 job_id 订阅(前端对接待办)
+- [x] WebSocket Hub(`/ws`) + Runner 事件广播 + 前端 `useLiveItems`(WS 优先 + 轮询兜底)
 
 ### 10.2 半完成(需要继续的具体缺口)🔶
 
-| 项 | 已做 | 缺口 |
-|---|---|---|
-| **WebSocket 实时推送** | 后端 Hub + 广播就绪 | 前端仍在轮询;Runner 还未调用 Broadcast(缺事件触发点) |
+### 10.2 半完成(需要继续的具体缺口)🔶
 
-历史上登记过"半完成"的另外两项 — 暂停/恢复 UI 和 Token 预算扣减 — 已在
-2026-05-10 闭环,迁移到 10.1。
+历史登记过 3 项"半完成",2026-05-10 全部闭环迁到 10.1:
+- WebSocket 实时推送(Runner 事件广播 + 前端 useLiveItems WS+轮询兜底)
+- 暂停/恢复 UI
+- Token 预算扣减 + 熔断
+
+当前无"半完成"项。
 
 ### 10.3 未开始(路线图)⏳
 
 **近期(1 个月内可做)**
-- [ ] 前端对接 WebSocket,移除 2s 轮询
+- [x] ~~前端对接 WebSocket~~(已完成)
 - [x] ~~前端补暂停/恢复按钮~~(已完成)
 - [x] ~~Runner 真实执行 token 预算扣减与熔断~~(已完成)
 - [x] ~~Codex Goal 集成(阶段 1:goal_assisted prompt 包装)~~(已完成)
