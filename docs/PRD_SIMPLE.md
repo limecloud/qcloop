@@ -16,6 +16,47 @@ qcloop 是一个**程序驱动的批量测试编排工具**，用程序遍历替
 - QA 测试工程师
 - 需要批量执行 AI 驱动测试的团队
 
+### 1.4 设计哲学:为什么选择 "程序兜底" 而不是 "AI 自主"
+
+qcloop 最核心的设计选择是 **把停止条件交给程序,而不是交给 AI**。这个选择来自一个判断:当前 AI 自主 loop 方案(例如 Codex `/goal`、Ralph loop)在批量任务上有一个共同的、尚未解决的缺陷——**收敛判定不可靠**。
+
+#### 对比:Codex `/goal` vs qcloop
+
+Codex CLI 0.128.0 在 2026-04-30 引入了 `/goal` slash command,本质是官方版的 Ralph loop:设置一个 objective 后,Codex 会自己在 `plan → act → test → review` 之间循环,直到它**自己判断**目标达成。
+
+| 维度 | Codex `/goal` | qcloop |
+|------|--------------|--------|
+| **停止条件** | AI 自评 "已完成" / token 预算 | `max_qc_rounds` 确定性上限 |
+| **判定主体** | 同一个 thread 内的 AI 自审 | 独立 verifier prompt(外部审查) |
+| **收敛保证** | 概率性(可能无限循环) | 确定性(到 N 轮必停) |
+| **轮次透明度** | 黑盒 loop,只看最终结果 | 每轮 attempt/qc_round 落库可查 |
+| **可复现性** | 取决于 session 状态 | 完整历史可回放 |
+| **API 稳定性** | experimental(0.128.0 新增,官方文档未收录) | 可落地的 CLI/HTTP 接口 |
+| **最适场景** | 单目标探索("把 p95 降到 120ms 以下") | 批量同质任务(100 个文件 review) |
+
+#### 三个关键差异
+
+**1. token budget 是"软"停止,max_qc_rounds 是"硬"停止**
+
+Codex goal 的 `tokenBudget` 本质是兜底熔断——budget 设得足够大时,行为等同无上限。而 qcloop 的 `max_qc_rounds` 是确定性终态:第 N 轮 verifier 仍 fail,item 直接标记 `exhausted`,**不由 AI 决定**。
+
+**2. AI 自评 vs 外部 verifier**
+
+Goal 的"done 判断"和"工作执行"发生在同一个 thread,AI 很容易"自我合理化"——说服自己"这已经够好了"。qcloop 的 worker 和 verifier 是**独立 prompt、独立判断**,结构上就无法自欺。对于有明确 pass/fail 标准的场景(代码规范检查、格式校验、功能验收),外部 verifier 的严格度碾压自评。
+
+**3. 批量场景下,程序编排 > AI 自由发挥**
+
+Goal 适合"一个复杂目标"(例如重构一个模块)。qcloop 适合"一百个同质任务"(例如 review 一百个文件)。同质任务中,**每一项的行为应该是一致的、可预测的、可审计的**——这正好是程序编排擅长、AI 自由发挥不擅长的。
+
+#### 何时该用 Goal,何时该用 qcloop
+
+- **选 Goal**:单目标探索 / 标准模糊,需要 AI 判断"够好了"/ 个人 overnight 实验 / 愿意接受 experimental 风险
+- **选 qcloop**:批量同质任务 / 有明确 pass/fail 标准 / 需要可复现可审计 / 生产 / CI 集成
+
+#### 未来演进:Goal 作为 qcloop 的一种 executor
+
+Goal 的官方基建(token 计数、中断恢复、session 持久化)会持续迭代。未来 qcloop 可以支持把 Goal 作为 executor 后端——**qcloop 保留 `max_qc_rounds` 外壳,每一轮内部用 Goal 做单次执行**,兼得两者优势。详见 `docs/GOAL_INTEGRATION.md` 的 "半自主模式"。
+
 ## 2. 核心功能
 
 ### 2.1 创建批次

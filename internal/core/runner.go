@@ -14,14 +14,22 @@ import (
 // Runner 批次执行器
 type Runner struct {
 	database *db.DB
-	executor *executor.CodexExecutor
+	executor executor.Executor
 }
 
-// NewRunner 创建执行器
+// NewRunner 创建执行器(默认使用 CodexExecutor)
 func NewRunner(database *db.DB) *Runner {
 	return &Runner{
 		database: database,
 		executor: executor.NewCodexExecutor(),
+	}
+}
+
+// NewRunnerWithExecutor 用指定 executor 创建 Runner(测试用)
+func NewRunnerWithExecutor(database *db.DB, exec executor.Executor) *Runner {
+	return &Runner{
+		database: database,
+		executor: exec,
 	}
 }
 
