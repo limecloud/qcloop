@@ -191,48 +191,18 @@ export function App() {
                   <thead>
                     <tr style={{ backgroundColor: '#f9f9f9', borderBottom: '1px solid #e0e0e0' }}>
                       <th style={thStyle}>批次名称</th>
+                      <th style={thStyle}>批次 ID</th>
                       <th style={thStyle}>状态</th>
+                      <th style={thStyle}>测试项</th>
+                      <th style={thStyle}>质检轮次</th>
                       <th style={thStyle}>创建时间</th>
+                      <th style={thStyle}>完成时间</th>
                       <th style={thStyle}>操作</th>
                     </tr>
                   </thead>
                   <tbody>
                     {jobs.map((job) => (
-                      <tr key={job.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
-                        <td style={tdStyle}>{job.name}</td>
-                        <td style={tdStyle}>
-                          <span
-                            style={{
-                              padding: '4px 12px',
-                              borderRadius: '12px',
-                              backgroundColor: job.status === 'completed' ? '#e1ffe1' : '#fff4e1',
-                              color: job.status === 'completed' ? '#2d7a2d' : '#f57c00',
-                              fontSize: '12px',
-                            }}
-                          >
-                            {job.status}
-                          </span>
-                        </td>
-                        <td style={tdStyle}>
-                          {new Date(job.created_at).toLocaleString('zh-CN')}
-                        </td>
-                        <td style={tdStyle}>
-                          <button
-                            onClick={() => setCurrentJob(job)}
-                            style={{
-                              padding: '4px 12px',
-                              backgroundColor: '#1976d2',
-                              color: '#fff',
-                              border: 'none',
-                              borderRadius: '4px',
-                              cursor: 'pointer',
-                              fontSize: '13px',
-                            }}
-                          >
-                            查看详情
-                          </button>
-                        </td>
-                      </tr>
+                      <JobRow key={job.id} job={job} onSelect={setCurrentJob} />
                     ))}
                   </tbody>
                 </table>
@@ -261,6 +231,117 @@ function StatCard({ label, value, color }: { label: string; value: number; color
         {value}
       </div>
     </div>
+  )
+}
+
+function JobRow({ job, onSelect }: { job: BatchJob; onSelect: (job: BatchJob) => void }) {
+  const [itemCount, setItemCount] = useState<number>(0)
+
+  useEffect(() => {
+    // 获取测试项数量
+    api.listItems(job.id).then((items) => {
+      setItemCount(items.length)
+    }).catch(() => {
+      setItemCount(0)
+    })
+  }, [job.id])
+
+  const getStatusLabel = (status: string) => {
+    const labels: Record<string, string> = {
+      pending: '待处理',
+      running: '运行中',
+      completed: '已完成',
+      failed: '失败',
+    }
+    return labels[status] || status
+  }
+
+  const getStatusColor = (status: string) => {
+    const colors: Record<string, { bg: string; color: string }> = {
+      pending: { bg: '#fff4e1', color: '#f57c00' },
+      running: { bg: '#e3f2fd', color: '#1976d2' },
+      completed: { bg: '#e1ffe1', color: '#2d7a2d' },
+      failed: { bg: '#ffe1e1', color: '#d32f2f' },
+    }
+    return colors[status] || colors.pending
+  }
+
+  const statusStyle = getStatusColor(job.status)
+
+  return (
+    <tr key={job.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
+      <td style={tdStyle}>
+        <div style={{ fontWeight: 500, color: '#333' }}>{job.name}</div>
+      </td>
+      <td style={tdStyle}>
+        <code style={{ fontSize: '11px', color: '#666', backgroundColor: '#f5f5f5', padding: '2px 6px', borderRadius: '3px' }}>
+          {job.id.substring(0, 8)}...
+        </code>
+      </td>
+      <td style={tdStyle}>
+        <span
+          style={{
+            padding: '4px 12px',
+            borderRadius: '12px',
+            backgroundColor: statusStyle.bg,
+            color: statusStyle.color,
+            fontSize: '12px',
+            fontWeight: 500,
+          }}
+        >
+          {getStatusLabel(job.status)}
+        </span>
+      </td>
+      <td style={tdStyle}>
+        <span style={{ color: '#666' }}>{itemCount} 项</span>
+      </td>
+      <td style={tdStyle}>
+        <span style={{ color: '#666' }}>最多 {job.max_qc_rounds} 轮</span>
+      </td>
+      <td style={tdStyle}>
+        <span style={{ fontSize: '13px', color: '#666' }}>
+          {new Date(job.created_at).toLocaleString('zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+          })}
+        </span>
+      </td>
+      <td style={tdStyle}>
+        {job.finished_at ? (
+          <span style={{ fontSize: '13px', color: '#666' }}>
+            {new Date(job.finished_at).toLocaleString('zh-CN', {
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+            })}
+          </span>
+        ) : (
+          <span style={{ fontSize: '13px', color: '#999' }}>-</span>
+        )}
+      </td>
+      <td style={tdStyle}>
+        <button
+          onClick={() => onSelect(job)}
+          style={{
+            padding: '6px 16px',
+            backgroundColor: '#1976d2',
+            color: '#fff',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '13px',
+            fontWeight: 500,
+          }}
+        >
+          查看详情
+        </button>
+      </td>
+    </tr>
   )
 }
 
