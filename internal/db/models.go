@@ -9,7 +9,8 @@ type BatchJob struct {
 	PromptTemplate         string     `json:"prompt_template"`
 	VerifierPromptTemplate string     `json:"verifier_prompt_template"`
 	MaxQCRounds            int        `json:"max_qc_rounds"`
-	Status                 string     `json:"status"` // pending/running/completed/failed
+	TokenBudgetPerItem     int        `json:"token_budget_per_item"` // 每个 item 的 token 预算
+	Status                 string     `json:"status"`                // pending/running/completed/failed/paused
 	CreatedAt              time.Time  `json:"created_at"`
 	FinishedAt             *time.Time `json:"finished_at"`
 }
@@ -22,6 +23,8 @@ type BatchItem struct {
 	Status           string     `json:"status"` // pending/running/success/failed/exhausted
 	CurrentAttemptNo int        `json:"current_attempt_no"`
 	CurrentQCNo      int        `json:"current_qc_no"`
+	TokensUsed       int        `json:"tokens_used"`       // 已使用的 token 数量
+	TimeUsedSeconds  int        `json:"time_used_seconds"` // 已使用的时间（秒）
 	CreatedAt        time.Time  `json:"created_at"`
 	FinishedAt       *time.Time `json:"finished_at"`
 }
@@ -36,6 +39,7 @@ type Attempt struct {
 	Stdout      string     `json:"stdout"`
 	Stderr      string     `json:"stderr"`
 	ExitCode    *int       `json:"exit_code"`
+	TokensUsed  int        `json:"tokens_used"`  // 本次尝试使用的 token 数量
 	StartedAt   time.Time  `json:"started_at"`
 	FinishedAt  *time.Time `json:"finished_at"`
 }
@@ -48,6 +52,7 @@ type QCRound struct {
 	Status      string     `json:"status"` // running/pass/fail
 	Verdict     string     `json:"verdict"`
 	Feedback    string     `json:"feedback"`
+	TokensUsed  int        `json:"tokens_used"` // 本次质检使用的 token 数量
 	StartedAt   time.Time  `json:"started_at"`
 	FinishedAt  *time.Time `json:"finished_at"`
 }
