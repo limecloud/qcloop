@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/coso/qcloop/internal/core"
@@ -13,17 +15,20 @@ import (
 
 // Server HTTP API 服务器
 type Server struct {
-	database *db.DB
-	runner   *core.Runner
-	mux      *http.ServeMux
+	database       *db.DB
+	runner         *core.Runner
+	mux            *http.ServeMux
+	runningJobs    map[string]context.CancelFunc
+	runningJobsMux sync.RWMutex
 }
 
 // NewServer 创建 API 服务器
 func NewServer(database *db.DB) *Server {
 	s := &Server{
-		database: database,
-		runner:   core.NewRunner(database),
-		mux:      http.NewServeMux(),
+		database:    database,
+		runner:      core.NewRunner(database),
+		mux:         http.NewServeMux(),
+		runningJobs: make(map[string]context.CancelFunc),
 	}
 	s.setupRoutes()
 	return s
@@ -33,6 +38,8 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/jobs", s.handleJobs)
 	s.mux.HandleFunc("/api/jobs/", s.handleJob)
 	s.mux.HandleFunc("/api/jobs/run", s.handleRunJob)
+	s.mux.HandleFunc("/api/jobs/pause", s.handlePauseJob)
+	s.mux.HandleFunc("/api/jobs/resume", s.handleResumeJob)
 	s.mux.HandleFunc("/api/items/", s.handleItems)
 }
 
@@ -50,35 +57,45 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// handleJobs 处理批次列表和创建
+// handleJobs 处理批次列表
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case "GET":
+	if r.Method == "GET" {
 		s.listJobs(w, r)
-	case "POST":
+	} else if r.Method == "POST" {
 		s.createJob(w, r)
-	default:
+	} else {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 // handleJob 处理单个批次
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
-	jobID := r.URL.Path[len("/api/jobs/"):]
-	if jobID == "" {
-		http.Error(w, "Job ID required", http.StatusBadRequest)
+	// 从 URL 中提取 job ID
+	// /api/jobs/{id}
+	path := r.URL.Path
+	id := path[len("/api/jobs/"):]
+
+	if id == "" {
+		http.Error(w, "job_id required", http.StatusBadRequest)
 		return
 	}
 
-	switch r.Method {
-	case "GET":
-		s.getJob(w, r, jobID)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	job, err := s.database.GetJob(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+
+	if job == nil {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(job)
 }
 
-// handleRunJob 运行批次
+// handleRunJob 处理运行批次
 func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -88,6 +105,7 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		JobID string `json:"job_id"`
 	}
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -95,12 +113,104 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 
 	// 在后台运行批次
 	go func() {
-		ctx := context.Background()
+		ctx, cancel := context.WithCancel(context.Background())
+
+		s.runningJobsMux.Lock()
+		s.runningJobs[req.JobID] = cancel
+		s.runningJobsMux.Unlock()
+
+		defer func() {
+			s.runningJobsMux.Lock()
+			delete(s.runningJobs, req.JobID)
+			s.runningJobsMux.Unlock()
+		}()
+
 		s.runner.RunBatch(ctx, req.JobID)
 	}()
 
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "started",
+	})
+}
+
+// handlePauseJob 处理暂停批次
+func (s *Server) handlePauseJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		JobID string `json:"job_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// 取消正在运行的批次
+	s.runningJobsMux.Lock()
+	cancel, exists := s.runningJobs[req.JobID]
+	s.runningJobsMux.Unlock()
+
+	if exists {
+		cancel()
+		// 更新批次状态为 paused
+		if err := s.database.UpdateJobStatus(req.JobID, "paused"); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "paused",
+	})
+}
+
+// handleResumeJob 处理恢复批次
+func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		JobID string `json:"job_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// 更新批次状态为 running
+	if err := s.database.UpdateJobStatus(req.JobID, "running"); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 在后台继续运行批次
+	go func() {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		s.runningJobsMux.Lock()
+		s.runningJobs[req.JobID] = cancel
+		s.runningJobsMux.Unlock()
+
+		defer func() {
+			s.runningJobsMux.Lock()
+			delete(s.runningJobs, req.JobID)
+			s.runningJobsMux.Unlock()
+		}()
+
+		s.runner.RunBatch(ctx, req.JobID)
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "resumed",
 	})
 }
 
@@ -181,11 +291,11 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 // createJob 创建批次
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name                   string   `json:"name"`
-		PromptTemplate         string   `json:"prompt_template"`
-		VerifierPromptTemplate string   `json:"verifier_prompt_template"`
-		MaxQCRounds            int      `json:"max_qc_rounds"`
-		Items                  []string `json:"items"`
+		Name                     string   `json:"name"`
+		PromptTemplate           string   `json:"prompt_template"`
+		VerifierPromptTemplate   string   `json:"verifier_prompt_template"`
+		MaxQCRounds              int      `json:"max_qc_rounds"`
+		Items                    []string `json:"items"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -193,19 +303,14 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.MaxQCRounds == 0 {
-		req.MaxQCRounds = 3
-	}
-
-	jobID := db.GenerateID()
 	job := &db.BatchJob{
-		ID:                     jobID,
-		Name:                   req.Name,
-		PromptTemplate:         req.PromptTemplate,
-		VerifierPromptTemplate: req.VerifierPromptTemplate,
-		MaxQCRounds:            req.MaxQCRounds,
-		Status:                 "pending",
-		CreatedAt:              time.Now(),
+		ID:                       generateID(),
+		Name:                     req.Name,
+		PromptTemplate:           req.PromptTemplate,
+		VerifierPromptTemplate:   req.VerifierPromptTemplate,
+		MaxQCRounds:              req.MaxQCRounds,
+		Status:                   "pending",
+		CreatedAt:                time.Now(),
 	}
 
 	if err := s.database.CreateJob(job); err != nil {
@@ -213,13 +318,14 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 创建批次项
 	for _, itemValue := range req.Items {
 		item := &db.BatchItem{
-			ID:         db.GenerateID(),
-			BatchJobID: jobID,
-			ItemValue:  itemValue,
-			Status:     "pending",
-			CreatedAt:  time.Now(),
+			ID:          generateID(),
+			BatchJobID:  job.ID,
+			ItemValue:   itemValue,
+			Status:      "pending",
+			CreatedAt:   time.Now(),
 		}
 		if err := s.database.CreateItem(item); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -231,23 +337,6 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(job)
 }
 
-// getJob 获取批次详情
-func (s *Server) getJob(w http.ResponseWriter, r *http.Request, jobID string) {
-	job, err := s.database.GetJob(jobID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if job == nil {
-		http.Error(w, "Job not found", http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(job)
-}
-
-// 辅助方法
 func (s *Server) listAttempts(itemID string) ([]*db.Attempt, error) {
 	query := `SELECT id, batch_item_id, attempt_no, attempt_type, status, stdout, stderr, exit_code, started_at, finished_at FROM attempts WHERE batch_item_id = ? ORDER BY attempt_no`
 	rows, err := s.database.Conn().Query(query, itemID)
@@ -259,16 +348,21 @@ func (s *Server) listAttempts(itemID string) ([]*db.Attempt, error) {
 	var attempts []*db.Attempt
 	for rows.Next() {
 		attempt := &db.Attempt{}
-		var exitCode, finishedAt interface{}
-		if err := rows.Scan(&attempt.ID, &attempt.BatchItemID, &attempt.AttemptNo, &attempt.AttemptType, &attempt.Status, &attempt.Stdout, &attempt.Stderr, &exitCode, &attempt.StartedAt, &finishedAt); err != nil {
+		var exitCode interface{}
+		var startedAt, finishedAt string
+		if err := rows.Scan(&attempt.ID, &attempt.BatchItemID, &attempt.AttemptNo, &attempt.AttemptType, &attempt.Status, &attempt.Stdout, &attempt.Stderr, &exitCode, &startedAt, &finishedAt); err != nil {
 			return nil, err
 		}
 		if exitCode != nil {
 			ec := int(exitCode.(int64))
 			attempt.ExitCode = &ec
 		}
-		if finishedAt != nil {
-			t, _ := time.Parse(time.RFC3339, finishedAt.(string))
+		if startedAt != "" {
+			t, _ := time.Parse(time.RFC3339, startedAt)
+			attempt.StartedAt = t
+		}
+		if finishedAt != "" {
+			t, _ := time.Parse(time.RFC3339, finishedAt)
 			attempt.FinishedAt = &t
 		}
 		attempts = append(attempts, attempt)
@@ -284,23 +378,26 @@ func (s *Server) listQCRounds(itemID string) ([]*db.QCRound, error) {
 	}
 	defer rows.Close()
 
-	var qcRounds []*db.QCRound
+	var rounds []*db.QCRound
 	for rows.Next() {
-		qc := &db.QCRound{}
-		var finishedAt interface{}
-		if err := rows.Scan(&qc.ID, &qc.BatchItemID, &qc.QCNo, &qc.Status, &qc.Verdict, &qc.Feedback, &qc.StartedAt, &finishedAt); err != nil {
+		round := &db.QCRound{}
+		var startedAt, finishedAt string
+		if err := rows.Scan(&round.ID, &round.BatchItemID, &round.QCNo, &round.Status, &round.Verdict, &round.Feedback, &startedAt, &finishedAt); err != nil {
 			return nil, err
 		}
-		if finishedAt != nil {
-			t, _ := time.Parse(time.RFC3339, finishedAt.(string))
-			qc.FinishedAt = &t
+		if startedAt != "" {
+			t, _ := time.Parse(time.RFC3339, startedAt)
+			round.StartedAt = t
 		}
-		qcRounds = append(qcRounds, qc)
+		if finishedAt != "" {
+			t, _ := time.Parse(time.RFC3339, finishedAt)
+			round.FinishedAt = &t
+		}
+		rounds = append(rounds, round)
 	}
-	return qcRounds, rows.Err()
+	return rounds, rows.Err()
 }
 
-// Start 启动服务器
-func (s *Server) Start(addr string) error {
-	return http.ListenAndServe(addr, s)
+func generateID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
