@@ -12,6 +12,15 @@
 
 > **AI agent 使用者请读 [llms-full.txt](./llms-full.txt)**(导航索引见 [llms.txt](./llms.txt))。
 > qcloop 的设计意图之一就是让 AI agent 通过 HTTP API 自动提单、人类只在面板监管,不要手动在 UI 里填表。
+> 人类使用 Codex / Claude Code 的最短路径见 [AI Agent 一句话使用指南](docs/AI_AGENT_USAGE.md):打开 qcloop 后,让 agent 读取 `http://localhost:3000/llm-full.txt` 并自动提单。
+
+**最快用法**:先打开 qcloop,再把这句话发给 Codex / Claude Code:
+
+```text
+请读取 http://localhost:3000/llm-full.txt，然后使用 qcloop 帮我测试当前任务。
+```
+
+`llm-full.txt` 会指导 AI 自动理解上下文、拆分自动化测试任务、创建批次并启动运行。完整说明见 [AI Agent 一句话使用指南](docs/AI_AGENT_USAGE.md)。
 
 </div>
 
@@ -176,7 +185,19 @@ qcloop --help
 
 ## 📚 使用指南
 
-### CLI 使用
+### 推荐：AI Agent 一句话使用
+
+日常使用推荐先打开 qcloop 面板，然后把下面这句话发给 Codex / Claude Code。详细的上下文理解、任务拆分、提单和运行规则都内置在 `llm-full.txt` 中。
+
+```text
+请读取 http://localhost:3000/llm-full.txt，然后使用 qcloop 帮我测试当前任务。
+```
+
+完整说明见 [AI Agent 一句话使用指南](docs/AI_AGENT_USAGE.md)。
+
+### CLI 使用（开发者 / 手动模式）
+
+CLI 适合开发、调试或脚本集成；普通 AI agent 使用场景不推荐让人手动创建批次。
 
 #### 1. 创建批次
 
@@ -258,15 +279,16 @@ qcloop status --job-id abc-123-def
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-### Web 界面使用
+### Web 界面使用（监管 / 开发模式）
 
-#### 1. 启动服务
+Web 面板的核心用途是监管进度和查看证据。创建表单保留给手动调试；推荐让 Codex / Claude Code 读取 `llm-full.txt` 后自动提单。
+
+#### 1. 打开服务
+
+日常使用直接用你的应用入口或团队封装方式打开 qcloop。下面命令只用于源码开发或排障：
 
 ```bash
-# 启动后端 API
 qcloop serve --addr :8080
-
-# 启动前端（新终端）
 cd web
 npm install
 npm run dev
@@ -437,6 +459,7 @@ qcloop/
 │   ├── tsconfig.json
 │   └── vite.config.ts
 ├── docs/                    # 文档
+│   ├── AI_AGENT_USAGE.md     # Codex / Claude Code 一句话使用指南
 │   ├── PRD.md               # 产品需求文档（含设计哲学、用户故事）
 │   ├── TEST_CASES.md        # 测试用例（32 个测试点）
 │   ├── QUICK_TEST.md        # 快速测试指南
@@ -488,6 +511,7 @@ qcloop/
 
 ## 📖 文档
 
+- [AI Agent 一句话使用指南](docs/AI_AGENT_USAGE.md) - 打开 qcloop 后,让 Codex / Claude Code 读取 `http://localhost:3000/llm-full.txt`,自动理解上下文、拆分测试任务并自动提单
 - [产品需求文档 (PRD)](docs/PRD.md) - 含设计哲学、用户故事、界面设计
 - [测试用例文档](docs/TEST_CASES.md) - 32 个详细测试用例
 - [快速测试指南](docs/QUICK_TEST.md) - 5 分钟快速测试
@@ -509,7 +533,7 @@ qcloop/
 - 自定义 Hooks
 
 **执行器**：
-- Codex CLI（子进程调用）
+- Codex CLI（子进程调用，支持通过 `QCLOOP_CODEX_SANDBOX` / `QCLOOP_CODEX_APPROVAL_POLICY` 可选配置权限；详见 [AI Agent 一句话使用指南](docs/AI_AGENT_USAGE.md)）
 
 ## 🔧 开发
 
