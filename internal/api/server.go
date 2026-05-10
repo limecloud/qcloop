@@ -55,7 +55,13 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/jobs/run", s.handleRunJob)
 	s.mux.HandleFunc("/api/jobs/pause", s.handlePauseJob)
 	s.mux.HandleFunc("/api/jobs/resume", s.handleResumeJob)
+	s.mux.HandleFunc("/api/jobs/cancel", s.handleCancelJob)
+	s.mux.HandleFunc("/api/templates", s.handleTemplates)
+	s.mux.HandleFunc("/api/templates/", s.handleTemplate)
+	s.mux.HandleFunc("/api/queue/metrics", s.handleQueueMetrics)
 	s.mux.HandleFunc("/api/items/answer", s.handleAnswerItem)
+	s.mux.HandleFunc("/api/items/retry", s.handleRetryItem)
+	s.mux.HandleFunc("/api/items/cancel", s.handleCancelItem)
 	s.mux.HandleFunc("/api/items/", s.handleItems)
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
 }
@@ -148,6 +154,10 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 	if req.ExecutorProvider == "" {
 		req.ExecutorProvider = job.ExecutorProvider
 	}
+	if req.MaxExecutorRetries == nil {
+		existingRetries := job.MaxExecutorRetries
+		req.MaxExecutorRetries = &existingRetries
+	}
 	if err := normalizeJobPayload(&req, job.ExecutorProvider); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -158,6 +168,9 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 	job.VerifierPromptTemplate = req.VerifierPromptTemplate
 	job.MaxQCRounds = req.MaxQCRounds
 	job.TokenBudgetPerItem = req.TokenBudgetPerItem
+	if req.MaxExecutorRetries != nil {
+		job.MaxExecutorRetries = *req.MaxExecutorRetries
+	}
 	job.ExecutionMode = req.ExecutionMode
 	job.ExecutorProvider = req.ExecutorProvider
 
@@ -206,6 +219,7 @@ type jobPayload struct {
 	VerifierPromptTemplate string `json:"verifier_prompt_template"`
 	MaxQCRounds            int    `json:"max_qc_rounds"`
 	TokenBudgetPerItem     int    `json:"token_budget_per_item"`
+	MaxExecutorRetries     *int   `json:"max_executor_retries"`
 	ExecutionMode          string `json:"execution_mode"`
 	ExecutorProvider       string `json:"executor_provider"`
 }
@@ -228,6 +242,13 @@ func normalizeJobPayload(req *jobPayload, defaultProvider string) error {
 	if req.TokenBudgetPerItem < 0 {
 		return fmt.Errorf("token_budget_per_item must be >= 0")
 	}
+	if req.MaxExecutorRetries == nil {
+		defaultRetries := 1
+		req.MaxExecutorRetries = &defaultRetries
+	}
+	if *req.MaxExecutorRetries < 0 || *req.MaxExecutorRetries > 5 {
+		return fmt.Errorf("max_executor_retries must be between 0 and 5")
+	}
 	if req.ExecutionMode == "" {
 		req.ExecutionMode = "standard"
 	}
@@ -242,6 +263,46 @@ func normalizeJobPayload(req *jobPayload, defaultProvider string) error {
 		return err
 	}
 	req.ExecutorProvider = provider
+	return nil
+}
+
+type templatePayload struct {
+	Name                   string `json:"name"`
+	Description            string `json:"description"`
+	PromptTemplate         string `json:"prompt_template"`
+	VerifierPromptTemplate string `json:"verifier_prompt_template"`
+	MaxQCRounds            int    `json:"max_qc_rounds"`
+	TokenBudgetPerItem     int    `json:"token_budget_per_item"`
+	MaxExecutorRetries     *int   `json:"max_executor_retries"`
+	ExecutionMode          string `json:"execution_mode"`
+	ExecutorProvider       string `json:"executor_provider"`
+	ItemsText              string `json:"items_text"`
+}
+
+func normalizeTemplatePayload(req *templatePayload, defaultProvider string) error {
+	jobReq := jobPayload{
+		Name:                   req.Name,
+		PromptTemplate:         req.PromptTemplate,
+		VerifierPromptTemplate: req.VerifierPromptTemplate,
+		MaxQCRounds:            req.MaxQCRounds,
+		TokenBudgetPerItem:     req.TokenBudgetPerItem,
+		MaxExecutorRetries:     req.MaxExecutorRetries,
+		ExecutionMode:          req.ExecutionMode,
+		ExecutorProvider:       req.ExecutorProvider,
+	}
+	if err := normalizeJobPayload(&jobReq, defaultProvider); err != nil {
+		return err
+	}
+	req.Name = jobReq.Name
+	req.Description = strings.TrimSpace(req.Description)
+	req.PromptTemplate = jobReq.PromptTemplate
+	req.VerifierPromptTemplate = jobReq.VerifierPromptTemplate
+	req.MaxQCRounds = jobReq.MaxQCRounds
+	req.TokenBudgetPerItem = jobReq.TokenBudgetPerItem
+	req.MaxExecutorRetries = jobReq.MaxExecutorRetries
+	req.ExecutionMode = jobReq.ExecutionMode
+	req.ExecutorProvider = jobReq.ExecutorProvider
+	req.ItemsText = strings.TrimSpace(req.ItemsText)
 	return nil
 }
 
@@ -270,6 +331,9 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if job == nil {
 		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	} else if job.Status == "canceled" {
+		http.Error(w, "canceled job cannot be run", http.StatusConflict)
 		return
 	}
 
@@ -361,6 +425,47 @@ func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCancelJob 处理批次取消。取消是不可恢复终态,区别于暂停。
+func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		JobID  string `json:"job_id"`
+		Reason string `json:"reason"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.JobID) == "" {
+		http.Error(w, "job_id required", http.StatusBadRequest)
+		return
+	}
+	if job, err := s.database.GetJob(req.JobID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if job == nil {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	} else if job.Status == "completed" || job.Status == "failed" || job.Status == "canceled" {
+		http.Error(w, "terminal job cannot be canceled", http.StatusConflict)
+		return
+	}
+	if err := s.queue.CancelJob(req.JobID, req.Reason); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "canceled",
+	})
+}
+
 // handleItems 处理批次项列表
 func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 	jobID := r.URL.Query().Get("job_id")
@@ -401,6 +506,239 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(details)
+}
+
+func (s *Server) handleRetryItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ItemID string `json:"item_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.ItemID = strings.TrimSpace(req.ItemID)
+	if req.ItemID == "" {
+		http.Error(w, "item_id required", http.StatusBadRequest)
+		return
+	}
+	item, err := s.database.GetItem(req.ItemID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if item == nil {
+		http.Error(w, "item not found", http.StatusNotFound)
+		return
+	}
+	job, err := s.database.GetJob(item.BatchJobID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if job == nil {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+	if job.Status == "canceled" {
+		http.Error(w, "canceled job cannot retry items", http.StatusConflict)
+		return
+	}
+	fresh, err := s.database.RetryItem(req.ItemID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if err := s.database.StartJob(item.BatchJobID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.queue.Wake()
+	s.runner.EmitItemUpdate(item.BatchJobID, item.ID)
+	s.runner.EmitJobUpdate(item.BatchJobID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "retried",
+		"item":   fresh,
+	})
+}
+
+func (s *Server) handleCancelItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ItemID string `json:"item_id"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.ItemID = strings.TrimSpace(req.ItemID)
+	if req.ItemID == "" {
+		http.Error(w, "item_id required", http.StatusBadRequest)
+		return
+	}
+	fresh, err := s.queue.CancelItem(req.ItemID, req.Reason)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "canceled",
+		"item":   fresh,
+	})
+}
+
+func (s *Server) handleQueueMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	metrics, err := s.queue.Metrics()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
+func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		templates, err := s.database.ListTemplates()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if templates == nil {
+			templates = []*db.BatchTemplate{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(templates)
+	case http.MethodPost:
+		var req templatePayload
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		defaultProvider, err := executor.DefaultProviderFromEnv()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := normalizeTemplatePayload(&req, defaultProvider); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		template := &db.BatchTemplate{
+			ID:                     db.GenerateID(),
+			Name:                   req.Name,
+			Description:            req.Description,
+			PromptTemplate:         req.PromptTemplate,
+			VerifierPromptTemplate: req.VerifierPromptTemplate,
+			MaxQCRounds:            req.MaxQCRounds,
+			TokenBudgetPerItem:     req.TokenBudgetPerItem,
+			MaxExecutorRetries:     *req.MaxExecutorRetries,
+			ExecutionMode:          req.ExecutionMode,
+			ExecutorProvider:       req.ExecutorProvider,
+			ItemsText:              req.ItemsText,
+			CreatedAt:              time.Now(),
+		}
+		if err := s.database.CreateTemplate(template); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(template)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleTemplate(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/templates/")
+	if id == "" {
+		http.Error(w, "template_id required", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		template, err := s.database.GetTemplate(id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if template == nil {
+			http.Error(w, "template not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(template)
+	case http.MethodPut:
+		existing, err := s.database.GetTemplate(id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if existing == nil {
+			http.Error(w, "template not found", http.StatusNotFound)
+			return
+		}
+		var req templatePayload
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.MaxExecutorRetries == nil {
+			existingRetries := existing.MaxExecutorRetries
+			req.MaxExecutorRetries = &existingRetries
+		}
+		if req.ExecutorProvider == "" {
+			req.ExecutorProvider = existing.ExecutorProvider
+		}
+		if err := normalizeTemplatePayload(&req, existing.ExecutorProvider); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		existing.Name = req.Name
+		existing.Description = req.Description
+		existing.PromptTemplate = req.PromptTemplate
+		existing.VerifierPromptTemplate = req.VerifierPromptTemplate
+		existing.MaxQCRounds = req.MaxQCRounds
+		existing.TokenBudgetPerItem = req.TokenBudgetPerItem
+		existing.MaxExecutorRetries = *req.MaxExecutorRetries
+		existing.ExecutionMode = req.ExecutionMode
+		existing.ExecutorProvider = req.ExecutorProvider
+		existing.ItemsText = req.ItemsText
+		if err := s.database.UpdateTemplate(existing); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fresh, err := s.database.GetTemplate(id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(fresh)
+	case http.MethodDelete:
+		if err := s.database.DeleteTemplate(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // handleAnswerItem 处理外层 AI 写回的人类确认答案。
@@ -471,7 +809,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	query := `SELECT id, name, prompt_template, verifier_prompt_template, max_qc_rounds, token_budget_per_item, execution_mode, executor_provider, run_no, status, created_at, finished_at FROM batch_jobs ORDER BY created_at DESC`
+	query := `SELECT id, name, prompt_template, verifier_prompt_template, max_qc_rounds, token_budget_per_item, max_executor_retries, execution_mode, executor_provider, run_no, status, created_at, finished_at FROM batch_jobs ORDER BY created_at DESC`
 	rows, err := s.database.Conn().Query(query)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -484,7 +822,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		job := &db.BatchJob{}
 		var createdAt sql.NullString
 		var finishedAt sql.NullString
-		if err := rows.Scan(&job.ID, &job.Name, &job.PromptTemplate, &job.VerifierPromptTemplate, &job.MaxQCRounds, &job.TokenBudgetPerItem, &job.ExecutionMode, &job.ExecutorProvider, &job.RunNo, &job.Status, &createdAt, &finishedAt); err != nil {
+		if err := rows.Scan(&job.ID, &job.Name, &job.PromptTemplate, &job.VerifierPromptTemplate, &job.MaxQCRounds, &job.TokenBudgetPerItem, &job.MaxExecutorRetries, &job.ExecutionMode, &job.ExecutorProvider, &job.RunNo, &job.Status, &createdAt, &finishedAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -524,6 +862,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		VerifierPromptTemplate string   `json:"verifier_prompt_template"`
 		MaxQCRounds            int      `json:"max_qc_rounds"`
 		TokenBudgetPerItem     int      `json:"token_budget_per_item"`
+		MaxExecutorRetries     *int     `json:"max_executor_retries"`
 		ExecutionMode          string   `json:"execution_mode"`
 		ExecutorProvider       string   `json:"executor_provider"`
 		Items                  []string `json:"items"`
@@ -540,6 +879,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		VerifierPromptTemplate: req.VerifierPromptTemplate,
 		MaxQCRounds:            req.MaxQCRounds,
 		TokenBudgetPerItem:     req.TokenBudgetPerItem,
+		MaxExecutorRetries:     req.MaxExecutorRetries,
 		ExecutionMode:          req.ExecutionMode,
 		ExecutorProvider:       req.ExecutorProvider,
 	}
@@ -569,6 +909,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		VerifierPromptTemplate: payload.VerifierPromptTemplate,
 		MaxQCRounds:            payload.MaxQCRounds,
 		TokenBudgetPerItem:     payload.TokenBudgetPerItem,
+		MaxExecutorRetries:     *payload.MaxExecutorRetries,
 		ExecutionMode:          payload.ExecutionMode,
 		ExecutorProvider:       payload.ExecutorProvider,
 		Status:                 "pending",

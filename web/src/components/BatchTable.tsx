@@ -13,11 +13,14 @@ interface Props {
   items: BatchItem[]
   maxQCRounds?: number
   runNo?: number
+  jobStatus?: string
+  onRetryItem?: (item: BatchItem) => void
+  onCancelItem?: (item: BatchItem) => void
 }
 
 const ITEM_PAGE_SIZE = 10
 
-export function BatchTable({ items, maxQCRounds, runNo }: Props) {
+export function BatchTable({ items, maxQCRounds, runNo, jobStatus, onRetryItem, onCancelItem }: Props) {
   const [page, setPage] = useState(1)
   const pageCount = Math.max(1, Math.ceil(items.length / ITEM_PAGE_SIZE))
   const safePage = Math.min(page, pageCount)
@@ -58,6 +61,7 @@ export function BatchTable({ items, maxQCRounds, runNo }: Props) {
             <col style={{ width: '360px' }} />
             <col style={{ width: '110px' }} />
             <col style={{ width: '260px' }} />
+            <col style={{ width: '210px' }} />
           </colgroup>
           <thead>
             <tr style={headerRowStyle}>
@@ -70,6 +74,7 @@ export function BatchTable({ items, maxQCRounds, runNo }: Props) {
               <th style={thStyle}>执行摘要</th>
               <th style={thStyle}>变更</th>
               <th style={thStyle}>参数</th>
+              <th style={thStyle}>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -80,6 +85,9 @@ export function BatchTable({ items, maxQCRounds, runNo }: Props) {
                 index={pageStart + index + 1}
                 maxQCRounds={maxQCRounds}
                 runNo={runNo}
+                jobStatus={jobStatus}
+                onRetryItem={onRetryItem}
+                onCancelItem={onCancelItem}
               />
             ))}
           </tbody>
@@ -165,16 +173,24 @@ function ItemRow({
   index,
   maxQCRounds,
   runNo,
+  jobStatus,
+  onRetryItem,
+  onCancelItem,
 }: {
   item: BatchItem
   index: number
   maxQCRounds?: number
   runNo?: number
+  jobStatus?: string
+  onRetryItem?: (item: BatchItem) => void
+  onCancelItem?: (item: BatchItem) => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const currentAttempts = currentRunAttempts(item, runNo, maxQCRounds)
   const hasStarted = currentAttempts.length > 0
   const repairCount = currentAttempts.filter((a) => a.attempt_type === 'repair').length
+  const retryDisabled = item.status === 'running' || jobStatus === 'canceled'
+  const cancelDisabled = item.status === 'success' || item.status === 'canceled' || jobStatus === 'completed' || jobStatus === 'failed' || jobStatus === 'canceled'
 
   return (
     <>
@@ -215,10 +231,36 @@ function ItemRow({
         <td style={tdStyle}>
           <ParamPreview value={item.item_value} />
         </td>
+        <td style={tdStyle}>
+          <div style={rowActionStyle}>
+            <button
+              type="button"
+              disabled={retryDisabled || !onRetryItem}
+              onClick={(event) => {
+                event.stopPropagation()
+                onRetryItem?.(item)
+              }}
+              style={rowButtonStyle(retryDisabled || !onRetryItem, 'primary')}
+            >
+              重试
+            </button>
+            <button
+              type="button"
+              disabled={cancelDisabled || !onCancelItem}
+              onClick={(event) => {
+                event.stopPropagation()
+                onCancelItem?.(item)
+              }}
+              style={rowButtonStyle(cancelDisabled || !onCancelItem, 'danger')}
+            >
+              取消
+            </button>
+          </div>
+        </td>
       </tr>
       {expanded && (
         <tr style={expandedRowStyle}>
-          <td colSpan={9} style={{ padding: 0 }}>
+          <td colSpan={10} style={{ padding: 0 }}>
             <ItemDetails item={item} maxQCRounds={maxQCRounds} runNo={runNo} />
           </td>
         </tr>
@@ -457,7 +499,7 @@ function paginationButtonStyle(disabled: boolean): React.CSSProperties {
 
 const tableStyle: React.CSSProperties = {
   width: '100%',
-  minWidth: '1780px',
+  minWidth: '1990px',
   tableLayout: 'fixed',
   borderCollapse: 'separate',
   borderSpacing: 0,
@@ -566,6 +608,28 @@ const paramPreviewHintStyle: React.CSSProperties = {
   color: '#64748b',
   fontSize: '14px',
   fontWeight: 700,
+}
+
+const rowActionStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '8px',
+}
+
+function rowButtonStyle(disabled: boolean, tone: 'primary' | 'danger'): React.CSSProperties {
+  const active = tone === 'primary'
+    ? { backgroundColor: '#111827', color: '#fff', border: '1px solid #111827' }
+    : { backgroundColor: '#fff1f2', color: '#b91c1c', border: '1px solid #fecdd3' }
+  return {
+    padding: '8px 12px',
+    borderRadius: '999px',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    fontSize: '15px',
+    fontWeight: 800,
+    ...(disabled
+      ? { backgroundColor: '#f3f4f6', color: '#9ca3af', border: '1px solid #e5e7eb' }
+      : active),
+  }
 }
 
 const detailsShellStyle: React.CSSProperties = {

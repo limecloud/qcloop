@@ -419,14 +419,15 @@ sqlite3 ~/.qcloop/qcloop.db ".schema"
 ```
 
 **预期结果**：
-- 显示 4 张表的结构
+- 显示 5 张表的结构
 - batch_jobs
 - batch_items
 - attempts
 - qc_rounds
+- batch_templates
 
 **验证点**：
-- [ ] 4 张表都存在
+- [ ] 5 张表都存在
 - [ ] 外键约束正确
 - [ ] 索引存在
 

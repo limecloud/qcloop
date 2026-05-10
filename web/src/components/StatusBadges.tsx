@@ -22,6 +22,7 @@ export function StatusBadge({ status }: { status: string }) {
     failed: { bg: '#ffe8e8', color: '#d32f2f', label: '失败' },
     exhausted: { bg: '#fff1db', color: '#a85d11', label: '已耗尽' },
     awaiting_confirmation: { bg: '#eaf2ff', color: '#1d4ed8', label: '待确认' },
+    canceled: { bg: '#fff7ed', color: '#c2410c', label: '已取消' },
     pass: { bg: '#e8f8ed', color: '#23834b', label: '通过' },
     fail: { bg: '#ffe8e8', color: '#d32f2f', label: '未通过' },
   }
@@ -60,6 +61,7 @@ export function StageLabel({ status }: { status: string }) {
     failed: '执行失败',
     exhausted: '修复耗尽',
     awaiting_confirmation: '等待确认',
+    canceled: '已取消',
   }
   return <span style={stageTextStyle}>{labels[status] || status}</span>
 }
@@ -73,6 +75,7 @@ export function QueueLabel({ status }: { status: string }) {
     failed: { bg: '#ffe8e8', color: '#d32f2f', label: '已结束' },
     exhausted: { bg: '#fff1db', color: '#a85d11', label: '已结束' },
     awaiting_confirmation: { bg: '#eaf2ff', color: '#1d4ed8', label: '待确认' },
+    canceled: { bg: '#fff7ed', color: '#c2410c', label: '已取消' },
   }
   const style = styles[status] || styles.pending
   return (
@@ -143,6 +146,7 @@ function terminalSummaryLabel(status: string) {
     failed: '本轮失败',
     exhausted: '本轮耗尽',
     awaiting_confirmation: '等待确认',
+    canceled: '已取消',
   }
   return labels[status] || status
 }
@@ -156,6 +160,7 @@ function qcStatusLabel(status: string) {
     failed: '失败',
     exhausted: '已耗尽',
     awaiting_confirmation: '待确认',
+    canceled: '已取消',
   }
   return labels[status] || status
 }
@@ -246,6 +251,9 @@ export function QCSummary({ item, maxQCRounds, runNo }: Props) {
   }
   if (item.status === 'awaiting_confirmation') {
     return <span style={qcTextStyle}>等待外层 AI 获取确认</span>
+  }
+  if (item.status === 'canceled') {
+    return <span style={mutedTextStyle}>已取消</span>
   }
   if (qcRounds.length > 0) {
     return (

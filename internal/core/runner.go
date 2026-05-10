@@ -156,6 +156,9 @@ func (r *Runner) PrepareRunMode(jobID, mode string) (*db.BatchJob, []*db.BatchIt
 	if job.Status == "running" && mode != RunModeContinue {
 		return nil, nil, fmt.Errorf("running job can only continue")
 	}
+	if job.Status == "canceled" {
+		return nil, nil, fmt.Errorf("canceled job cannot be run")
+	}
 	emitPreparedItems := mode != RunModeContinue
 
 	switch mode {
@@ -279,14 +282,17 @@ func (r *Runner) processItem(ctx context.Context, job *db.BatchJob, item *db.Bat
 	if err != nil {
 		return err
 	}
-	attempt, err := r.executeWorker(ctx, activeExec, job, item, attemptNo, "worker")
+	attempt, attemptNo, err := r.executeWorkerWithRetries(ctx, activeExec, job, item, attemptNo, "worker")
 	if err != nil {
 		return err
 	}
 	if ctx.Err() != nil {
-		_ = r.database.RequeueItem(item.ID, "execution canceled")
+		_ = r.requeueItemIfJobStillRunnable(job.ID, item.ID, "execution canceled")
 		r.emitItemUpdate(job.ID, item.ID)
 		return ctx.Err()
+	}
+	if isRetryableExecutorAttempt(attempt) {
+		return r.setItemStatus(job.ID, item.ID, "failed")
 	}
 
 	// 如果没有配置 verifier，直接标记为成功
@@ -386,6 +392,51 @@ func (r *Runner) executeWorker(ctx context.Context, exec executor.Executor, job 
 	return r.executeWorkerPrompt(ctx, exec, prompt, item, job.RunNo, attemptNo, attemptType)
 }
 
+func (r *Runner) executeWorkerWithRetries(ctx context.Context, exec executor.Executor, job *db.BatchJob, item *db.BatchItem, attemptNo int, attemptType string) (*db.Attempt, int, error) {
+	prompt := renderWorkerPrompt(job.PromptTemplate, item)
+	return r.executeWorkerPromptWithRetries(ctx, exec, job, item, prompt, attemptNo, attemptType)
+}
+
+func (r *Runner) executeWorkerPromptWithRetries(ctx context.Context, exec executor.Executor, job *db.BatchJob, item *db.BatchItem, basePrompt string, attemptNo int, attemptType string) (*db.Attempt, int, error) {
+	retries := job.MaxExecutorRetries
+	if retries < 0 {
+		retries = 0
+	}
+	if retries > 5 {
+		retries = 5
+	}
+	currentAttemptNo := attemptNo
+	var last *db.Attempt
+	for retryIndex := 0; ; retryIndex++ {
+		prompt := basePrompt
+		if retryIndex > 0 {
+			prompt = appendExecutorRetryContext(prompt, retryIndex, retries)
+		}
+		attempt, err := r.executeWorkerPrompt(ctx, exec, prompt, item, job.RunNo, currentAttemptNo, attemptType)
+		if err != nil {
+			return nil, currentAttemptNo, err
+		}
+		last = attempt
+		if ctx.Err() != nil || !isRetryableExecutorAttempt(attempt) || retryIndex >= retries {
+			return last, currentAttemptNo, nil
+		}
+		currentAttemptNo++
+	}
+}
+
+func appendExecutorRetryContext(prompt string, retryIndex, maxRetries int) string {
+	return fmt.Sprintf(`%s
+
+---
+qcloop 自动重试上下文:
+- 上一次调用本机 AI CLI 出现执行器基础设施错误,这是第 %d/%d 次自动重试。
+- 请继续完成同一个 item,不要因为重试而改变任务边界。`, prompt, retryIndex, maxRetries)
+}
+
+func isRetryableExecutorAttempt(attempt *db.Attempt) bool {
+	return attempt != nil && attempt.ExitCode != nil && *attempt.ExitCode < 0
+}
+
 func (r *Runner) executeWorkerPrompt(ctx context.Context, exec executor.Executor, prompt string, item *db.BatchItem, runNo, attemptNo int, attemptType string) (*db.Attempt, error) {
 	attempt := &db.Attempt{
 		ID:          db.GenerateID(),
@@ -436,7 +487,7 @@ func (r *Runner) runQCLoop(ctx context.Context, exec executor.Executor, job *db.
 
 	for offset := 0; offset < job.MaxQCRounds; offset++ {
 		if ctx.Err() != nil {
-			_ = r.database.RequeueItem(item.ID, "execution canceled")
+			_ = r.requeueItemIfJobStillRunnable(job.ID, item.ID, "execution canceled")
 			r.emitItemUpdate(job.ID, item.ID)
 			return ctx.Err()
 		}
@@ -454,7 +505,7 @@ func (r *Runner) runQCLoop(ctx context.Context, exec executor.Executor, job *db.
 			return err
 		}
 		if ctx.Err() != nil {
-			_ = r.database.RequeueItem(item.ID, "execution canceled")
+			_ = r.requeueItemIfJobStillRunnable(job.ID, item.ID, "execution canceled")
 			r.emitItemUpdate(job.ID, item.ID)
 			return ctx.Err()
 		}
@@ -493,12 +544,13 @@ func (r *Runner) runQCLoop(ctx context.Context, exec executor.Executor, job *db.
 
 		// 执行 repair
 		attemptNo++
-		repairAttempt, err := r.executeRepair(ctx, exec, job, item, attemptNo, qcRound.Feedback)
+		repairAttempt, usedAttemptNo, err := r.executeRepair(ctx, exec, job, item, attemptNo, qcRound.Feedback)
 		if err != nil {
 			return err
 		}
+		attemptNo = usedAttemptNo
 		if ctx.Err() != nil {
-			_ = r.database.RequeueItem(item.ID, "execution canceled")
+			_ = r.requeueItemIfJobStillRunnable(job.ID, item.ID, "execution canceled")
 			r.emitItemUpdate(job.ID, item.ID)
 			return ctx.Err()
 		}
@@ -510,6 +562,24 @@ func (r *Runner) runQCLoop(ctx context.Context, exec executor.Executor, job *db.
 	}
 
 	return nil
+}
+
+func (r *Runner) requeueItemIfJobStillRunnable(jobID, itemID, reason string) error {
+	job, err := r.database.GetJob(jobID)
+	if err != nil {
+		return err
+	}
+	if job != nil && job.Status == "canceled" {
+		return nil
+	}
+	item, err := r.database.GetItem(itemID)
+	if err != nil {
+		return err
+	}
+	if item != nil && item.Status == "canceled" {
+		return nil
+	}
+	return r.database.RequeueItem(itemID, reason)
 }
 
 // checkBudgetExceeded:预算 > 0 且 item.tokens_used 已达到上限,则返回 true
@@ -567,7 +637,11 @@ func (r *Runner) executeVerifier(ctx context.Context, exec executor.Executor, jo
 	lastAttempt := attempts[len(attempts)-1]
 
 	// 构造 verifier prompt
-	prompt := renderVerifierPrompt(job.VerifierPromptTemplate, item.ItemValue, lastAttempt)
+	previousRounds, err := r.listQCRounds(item.ID)
+	if err != nil {
+		return nil, err
+	}
+	prompt := renderVerifierPrompt(job.VerifierPromptTemplate, item.ItemValue, lastAttempt, previousRounds)
 
 	qcRound := &db.QCRound{
 		ID:          db.GenerateID(),
@@ -632,21 +706,21 @@ func (r *Runner) executeVerifier(ctx context.Context, exec executor.Executor, jo
 }
 
 // executeRepair 执行 repair
-func (r *Runner) executeRepair(ctx context.Context, exec executor.Executor, job *db.BatchJob, item *db.BatchItem, attemptNo int, feedback string) (*db.Attempt, error) {
+func (r *Runner) executeRepair(ctx context.Context, exec executor.Executor, job *db.BatchJob, item *db.BatchItem, attemptNo int, feedback string) (*db.Attempt, int, error) {
 	attempts, err := r.listAttempts(item.ID)
 	if err != nil {
-		return nil, err
+		return nil, attemptNo, err
 	}
 	if len(attempts) == 0 {
-		return nil, fmt.Errorf("没有找到执行记录")
+		return nil, attemptNo, fmt.Errorf("没有找到执行记录")
 	}
 	lastAttempt := attempts[len(attempts)-1]
 	prompt := buildRepairPrompt(job.PromptTemplate, item, lastAttempt, feedback)
 
-	return r.executeWorkerPrompt(ctx, exec, prompt, item, job.RunNo, attemptNo, "repair")
+	return r.executeWorkerPromptWithRetries(ctx, exec, job, item, prompt, attemptNo, "repair")
 }
 
-func renderVerifierPrompt(template, itemValue string, attempt *db.Attempt) string {
+func renderVerifierPrompt(template, itemValue string, attempt *db.Attempt, previousRounds []*db.QCRound) string {
 	prompt := strings.ReplaceAll(template, "{{item}}", itemValue)
 	prompt = strings.ReplaceAll(prompt, "{{output}}", attempt.Stdout)
 	prompt = strings.ReplaceAll(prompt, "{{stdout}}", attempt.Stdout)
@@ -654,7 +728,41 @@ func renderVerifierPrompt(template, itemValue string, attempt *db.Attempt) strin
 	prompt = strings.ReplaceAll(prompt, "{{exit_code}}", formatExitCode(attempt.ExitCode))
 	prompt = strings.ReplaceAll(prompt, "{{attempt_status}}", attempt.Status)
 	prompt = strings.ReplaceAll(prompt, "{{attempt_type}}", attempt.AttemptType)
+	history := formatQCHistoryForPrompt(previousRounds)
+	prompt = strings.ReplaceAll(prompt, "{{qc_history}}", history)
+	prompt = strings.ReplaceAll(prompt, "{{issue_ledger}}", history)
+	if history != "" && !strings.Contains(template, "{{qc_history}}") && !strings.Contains(template, "{{issue_ledger}}") {
+		prompt = fmt.Sprintf(`%s
+
+---
+qcloop 质检历史 / issue ledger:
+%s
+
+请结合上面的历史判断旧问题是否已经修复、是否出现新的未解决问题。只有没有开放问题时才输出 {"pass": true, "feedback": "..."}。`, prompt, history)
+	}
 	return prompt
+}
+
+func formatQCHistoryForPrompt(rounds []*db.QCRound) string {
+	if len(rounds) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, round := range rounds {
+		status := round.Status
+		if status == "" {
+			status = "unknown"
+		}
+		feedback := strings.TrimSpace(round.Feedback)
+		if feedback == "" {
+			feedback = strings.TrimSpace(round.Verdict)
+		}
+		if feedback == "" {
+			feedback = "(无反馈)"
+		}
+		b.WriteString(fmt.Sprintf("- 质检 %d: %s; %s\n", round.QCNo, status, clipForPrompt(feedback)))
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func renderWorkerPrompt(template string, item *db.BatchItem) string {

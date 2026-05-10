@@ -1,7 +1,7 @@
 # qcloop — Full Reference for AI Agents
 
 > 本文件是 qcloop 的完整 AI-facing 参考。读完本文后你应当能独立完成
-> "创建批次 → 启动 → 轮询 → 解读结果 → 必要时向人确认 → 写回答案继续 → 决定是否重试"的全流程,不需要
+> "创建批次 → 启动 → 轮询 → 解读结果 → 必要时向人确认 → 写回答案继续 → 决定是否重试/取消 → 生成报告"的全流程,不需要
 > 再读其他文件。人类只负责下发意图、授权和必要确认;不要让人类手动提单或逐项操作。
 
 ---
@@ -18,6 +18,8 @@ qcloop 保证:
 - 每个 item 必然被执行,不漏、不重
 - 全局 worker pool 默认并发 2 个 item,用 SQLite lease 做断点恢复
 - 每次执行后(可选)由独立 verifier 审查;fail 则自动 repair,repair 会拿到上一轮 stdout/stderr/exit_code 和 verifier feedback,用于直接修复问题并复测
+- 本机 AI CLI 启动/进程类基础设施错误由 `max_executor_retries` 独立重试,不占用质检轮次
+- verifier 会收到前序 `qc_rounds` 形成的 issue ledger,用于判断旧问题是否修复、是否仍出现新问题
 - 达到 `max_qc_rounds` 轮仍未通过 → 标记 `exhausted`
 - 遇到 AI 无法判断或高风险动作 → 标记 `awaiting_confirmation`,由外层 AI 向人提问并写回答案继续
 - 超出 `token_budget_per_item` → 提前 `exhausted` 熔断
@@ -63,14 +65,18 @@ qcloop 有两条 AI 主入口:
   `{"pass": true|false, "feedback": "..."}`
   如遇到 AI 无法判断或需要风险确认,输出:
   `{"pass": false, "needs_confirmation": true, "question": "...", "feedback": "..."}`
-  Verifier 可使用 `{{output}}`/`{{stdout}}`、`{{stderr}}`、`{{exit_code}}`、`{{attempt_status}}`、`{{attempt_type}}` 占位符判断上一轮执行是否真的通过。
+  Verifier 可使用 `{{output}}`/`{{stdout}}`、`{{stderr}}`、`{{exit_code}}`、`{{attempt_status}}`、`{{attempt_type}}`、`{{qc_history}}`、`{{issue_ledger}}` 占位符判断上一轮执行是否真的通过,以及旧问题是否已经修复。
 - 调 `POST /api/jobs` 创建批次;如需指定内层 CLI,传 `executor_provider`
 - 调 `POST /api/jobs/run` 启动批次
-- 如果可用,优先通过 `qcloop-skill job create --file ... --run` 和 `qcloop-skill job wait ...` 调用,而不是手写 curl;该 CLI 默认输出 JSON,失败时 stderr 有 `error_code` / `retryable` / `hint`。
+- 如果可用,优先通过 `qcloop-skill job create --file ... --run` 和 `qcloop-skill job wait ...` 调用,而不是手写 curl;该 CLI 默认输出 JSON,失败时 stderr 有 `error_code` / `retryable` / `hint`。文件型任务可加 `--items-dir` / `--glob` / `--git-diff` 自动导入 items。
 - 把批次 ID 和 Web 面板地址告诉人类
 - 轮询 `GET /api/items?job_id=...` 和 `GET /api/jobs/:id`
+- 需要判断是否真在跑或是否卡住时,调用 `GET /api/queue/metrics` 或 `qcloop-skill queue metrics`
 - 如果发现 item.status=`awaiting_confirmation`,读取 `confirmation_question` 或 `last_error`,向人类提出一个清晰确认问题;拿到答案后调用 `POST /api/items/answer` 或 `qcloop-skill item answer ... --resume` 继续。
-- 完成后总结成功/失败/耗尽项,并引用 attempts / qc_rounds 里的证据
+- 如果只需局部重跑或跳过某一项,优先调用 `POST /api/items/retry` / `POST /api/items/cancel`,不要重建整个批次。
+- 对高频任务可用 `/api/templates` 或 `qcloop-skill template ...` 保存模板;Web 也提供保存、套用、删除模板的观察兜底。
+- 完成后用 `qcloop-skill job report <job_id> --format markdown` 或等价 API 证据总结成功/失败/耗尽/取消/待确认项,并引用 attempts / qc_rounds 里的证据
+- 如果批次方向错误或不再需要,调用 `/api/jobs/cancel` 或 `qcloop-skill job cancel <job_id> --reason "..."`;取消是不可恢复终态,不要和 pause 混淆
 - 如果测试暴露可修复问题,且人类允许修改工作区,repair 轮次应直接修改代码/文档并重新跑最小验证;未获授权时只报告问题,不要提交或推送。
 
 ### 2.3 自动理解上下文与拆分 items 的规则
@@ -82,8 +88,9 @@ qcloop 有两条 AI 主入口:
 3. **识别测试面**:按项目类型拆出 smoke、核心用户流、API/CLI contract、状态机、回归点、文档示例可执行性等测试面。
 4. **设计 item 粒度**:每个 item 应小而独立,有清晰输入、执行方式、通过标准和风险边界。不要把整个仓库塞进一个 item。
 5. **优先结构化 item**:复杂任务可把 `item_value` 写成 JSON 字符串,包含 `name`、`target`、`steps`、`expected`、`risk`、`cwd` 等字段;worker prompt 负责解析 `{{item}}`。
-6. **生成 verifier**:verifier 不要只看“命令退出码”,还要检查 stdout/stderr、产物、状态和用户可见结果是否满足 `expected`。输出必须是严格 JSON。
-7. **先保守再扩大**:默认先创建能证明主路径的最小批次;如果人类要求“充分测试”,再扩大到更多模块、边界和回归项。
+6. **批量文件自动导入**:大量文件任务优先让 Skill CLI 用 `--items-dir`、`--glob` 或 `--git-diff` 导入,不要手工漏抄路径。
+7. **生成 verifier**:verifier 不要只看“命令退出码”,还要检查 stdout/stderr、产物、状态、issue ledger 和用户可见结果是否满足 `expected`。输出必须是严格 JSON。
+8. **先保守再扩大**:默认先创建能证明主路径的最小批次;如果人类要求“充分测试”,再扩大到更多模块、边界和回归项。
 
 ### 2.4 你不应该做的事
 
@@ -128,13 +135,14 @@ qcloop 不保存 Claude / Gemini / Kiro 凭证,也不管理 team / organization 
 
 ## 4. 数据模型
 
-四张 SQLite 表,构成 4 级嵌套:
+五张 SQLite 表,其中 4 张构成执行证据链,`batch_templates` 用于复用批次配置:
 
 ```
 batch_job (1 个批次)
  └─ batch_item (N 个测试项)
      ├─ attempt (1~N 次执行尝试;第 1 次是 worker,后续是 repair)
      └─ qc_round (0~N 轮质检;verifier 启用时才有)
+batch_template (可选模板,不参与单次执行证据链)
 ```
 
 ### 4.1 batch_job
@@ -144,13 +152,14 @@ batch_job (1 个批次)
 | id | string (UUID) | 由 qcloop 生成,**创建时不要传** |
 | name | string | 批次名,给人看 |
 | prompt_template | string | Worker prompt,**必须含 `{{item}}` 占位符** |
-| verifier_prompt_template | string | Verifier prompt,可用 `{{item}}`、`{{output}}`/`{{stdout}}`、`{{stderr}}`、`{{exit_code}}`、`{{attempt_status}}`、`{{attempt_type}}`。输出必须是 JSON `{"pass": bool, "feedback": string}`。留空表示不做质检 |
+| verifier_prompt_template | string | Verifier prompt,可用 `{{item}}`、`{{output}}`/`{{stdout}}`、`{{stderr}}`、`{{exit_code}}`、`{{attempt_status}}`、`{{attempt_type}}`、`{{qc_history}}`、`{{issue_ledger}}`。输出必须是 JSON `{"pass": bool, "feedback": string}`。留空表示不做质检 |
 | max_qc_rounds | int | 质检+repair 最多轮数,默认 3,达到则 exhausted |
 | token_budget_per_item | int | 单 item token 上限;0 = 不限;超出则 exhausted |
+| max_executor_retries | int | 本机 AI CLI 启动/进程类基础设施错误自动重试次数,默认 1,范围 0-5 |
 | execution_mode | string | `"standard"`(默认)或 `"goal_assisted"`(把 prompt 包装成 Goal 风格,让单次 CLI 调用更收敛) |
 | executor_provider | string | `"codex"`(默认)、`"claude_code"`、`"gemini_cli"`、`"kiro_cli"`;决定内层 worker/verifier/repair 调哪个本机 CLI |
 | run_no | int | 当前运行轮次,从 1 开始;重试未成功项或重跑全部时递增 |
-| status | string | `pending` / `running` / `waiting_confirmation` / `paused` / `completed` / `failed`;`completed` 表示全部 item 成功,`failed` 表示批次已结束但存在 failed/exhausted item,`waiting_confirmation` 表示当前只剩待确认 item |
+| status | string | `pending` / `running` / `waiting_confirmation` / `paused` / `completed` / `failed` / `canceled`;`completed` 表示全部 item 成功,`failed` 表示批次已结束但存在 failed/exhausted item,`waiting_confirmation` 表示当前只剩待确认 item,`canceled` 表示明确终止 |
 | created_at | string (RFC3339) | |
 | finished_at | string (RFC3339) | |
 
@@ -161,7 +170,7 @@ batch_job (1 个批次)
 | id | string | |
 | batch_job_id | string | 外键 |
 | item_value | string | 单个测试项的值,会被注入 prompt 的 `{{item}}` |
-| status | string | `pending` / `running` / `success` / `failed` / `exhausted` / `awaiting_confirmation` |
+| status | string | `pending` / `running` / `success` / `failed` / `exhausted` / `awaiting_confirmation` / `canceled` |
 | current_attempt_no | int | 当前 attempt 编号 |
 | current_qc_no | int | 当前质检轮次 |
 | tokens_used | int | 已消耗 token(累加 worker+repair+verifier) |
@@ -173,7 +182,7 @@ batch_job (1 个批次)
 | confirmation_answer | string | 外层 AI 写回的人类确认答案 |
 | created_at / finished_at | RFC3339 | |
 
-**终态**:`success`(通过) / `failed`(worker 或 repair 非 0 退出) / `exhausted`(预算或轮次用尽)。`awaiting_confirmation` 不是终态,外层 AI 必须提问并写回答案。
+**终态**:`success`(通过) / `failed`(worker 或 repair 非 0 退出) / `exhausted`(预算或轮次用尽) / `canceled`(批次取消)。`awaiting_confirmation` 不是终态,外层 AI 必须提问并写回答案。
 
 ### 4.3 attempt
 
@@ -214,6 +223,7 @@ batch_job (1 个批次)
   "verifier_prompt_template": "string (可选)",
   "max_qc_rounds": 3,
   "token_budget_per_item": 0,
+  "max_executor_retries": 1,
   "execution_mode": "standard",
   "executor_provider": "codex",
   "items": ["item1", "item2", "item3"],
@@ -272,7 +282,15 @@ batch_job (1 个批次)
 
 响应 `{ "status": "started" }`。等价于用 `mode=continue` 重新入队,从 pending item 和租约过期的 running item 继续。
 
-### 5.5 POST /api/items/answer — 写回确认答案
+### 5.5 POST /api/jobs/cancel — 取消
+
+```json
+{ "job_id": "xxx", "reason": "方向错了,不再需要继续" }
+```
+
+响应 `{ "status": "canceled" }`。作用:把非终态 job.status 改为 `canceled`,取消当前 worker context,并把未完成 item 标为 `canceled`。取消是不可恢复终态;如果只是临时停止,用 `/api/jobs/pause`;已 `completed` / `failed` / `canceled` 的终态批次不能再取消。
+
+### 5.6 POST /api/items/answer — 写回确认答案
 
 当 `GET /api/items` 里某个 item 的 `status` 为 `awaiting_confirmation` 时,外层 AI 必须向人类确认,然后调用本接口写回答案。
 
@@ -295,15 +313,76 @@ batch_job (1 个批次)
 
 `resume=true` 会把该 item 重新入队并唤醒 worker。下一轮 worker/repair prompt 会自动包含 `confirmation_question` 和 `confirmation_answer`。
 
-### 5.6 GET /api/jobs — 列出所有批次
+### 5.7 POST /api/items/retry — 重试单个 item
+
+```json
+{ "item_id": "xxx" }
+```
+
+响应:
+```json
+{ "status": "retried", "item": { "status": "pending" } }
+```
+
+语义:保留历史 attempts / qc_rounds,只重置该 item 的当前状态、计数、token 和确认字段,然后重新入队并唤醒 worker。它不递增批次级 `run_no`;批次级重试仍用 `/api/jobs/run` 的 `mode=retry_unfinished`。
+
+### 5.8 POST /api/items/cancel — 取消单个 item
+
+```json
+{ "item_id": "xxx", "reason": "本项暂不处理" }
+```
+
+响应:
+```json
+{ "status": "canceled", "item": { "status": "canceled" } }
+```
+
+语义:取消非终态批次内的 pending / running / awaiting_confirmation item。running item 会先取消活跃上下文,避免被 runner 重新排队。若批次因此没有可运行 item,终态会收敛为 `failed`。
+
+### 5.9 GET /api/queue/metrics — 队列指标
+
+返回:
+```json
+{
+  "worker_count": 2,
+  "lease_duration_seconds": 900,
+  "poll_interval_seconds": 1,
+  "active_items": 1,
+  "active_jobs": 1,
+  "items": {
+    "total_items": 10,
+    "pending_items": 3,
+    "running_items": 1,
+    "awaiting_confirmation_items": 0,
+    "failed_items": 1,
+    "exhausted_items": 0,
+    "canceled_items": 0,
+    "stale_running_items": 0
+  }
+}
+```
+
+AI 看到 `pending_items > 0` 但 `active_items=0` 且长期不变时,应先检查 qcloop 服务、执行器登录状态和错误日志,再决定是否恢复/重试。
+
+### 5.10 /api/templates — 批次模板 CRUD
+
+- `GET /api/templates`:列出模板
+- `POST /api/templates`:创建模板
+- `GET /api/templates/{id}`:读取模板
+- `PUT /api/templates/{id}`:更新模板
+- `DELETE /api/templates/{id}`:删除模板
+
+模板字段与创建批次 payload 基本一致,额外包含 `description` 和 `items_text`。它用于复用常见 review / smoke / docs repair 配置,不代表自动运行;AI 套用模板后仍需创建新 job 并调用 `/api/jobs/run`。
+
+### 5.11 GET /api/jobs — 列出所有批次
 
 返回 BatchJob 数组(按 created_at DESC)。
 
-### 5.7 GET /api/jobs/:id — 获取单个批次
+### 5.12 GET /api/jobs/:id — 获取单个批次
 
 返回 BatchJob 对象。
 
-### 5.8 GET /api/items?job_id=xxx — 批次项详情
+### 5.13 GET /api/items?job_id=xxx — 批次项详情
 
 返回所有 batch_item,**每个 item 嵌套了它的 attempts 和 qc_rounds**:
 
@@ -337,10 +416,19 @@ AI agent 判断单个 item 时应读 `status`:失败原因看 `attempts[*].stder
 qcloop-skill doctor
 qcloop-skill guide --full --raw
 qcloop-skill job create --file /tmp/qcloop-job.json --run
+qcloop-skill job create --file /tmp/qcloop-job.json --cwd "$PWD" --glob "docs/**/*.md" --run
+qcloop-skill job create --file /tmp/qcloop-job.json --git-diff HEAD --run
 qcloop-skill job wait <job_id> --timeout 1800
 qcloop-skill job status <job_id> --include-items
+qcloop-skill job report <job_id> --format markdown
 qcloop-skill item answer <item_id> --answer "允许继续,但不要提交" --resume
+qcloop-skill item retry <item_id>
+qcloop-skill item cancel <item_id> --reason "本项暂不处理"
+qcloop-skill queue metrics
+qcloop-skill template list
+qcloop-skill template create --file /tmp/qcloop-template.json
 qcloop-skill job run <job_id> --mode retry_unfinished
+qcloop-skill job cancel <job_id> --reason "不再需要继续"
 
 # 没有全局命令时使用仓库内置版本
 skills/qcloop/bin/qcloop-skill doctor
@@ -348,6 +436,8 @@ skills/qcloop/bin/qcloop-skill guide --full --raw
 skills/qcloop/bin/qcloop-skill job create --file /tmp/qcloop-job.json --run
 skills/qcloop/bin/qcloop-skill job wait <job_id> --timeout 1800
 skills/qcloop/bin/qcloop-skill job status <job_id> --include-items
+skills/qcloop/bin/qcloop-skill queue metrics
+skills/qcloop/bin/qcloop-skill job report <job_id> --format markdown
 skills/qcloop/bin/qcloop-skill item answer <item_id> --answer "允许继续,但不要提交" --resume
 skills/qcloop/bin/qcloop-skill job run <job_id> --mode retry_unfinished
 ```
@@ -479,7 +569,7 @@ INSTRUCTIONS:
 
 - **qcloop 不保存凭证,也不替 CLI 做账号管理**。它只调用本机 Codex / Claude Code / Gemini CLI / Kiro CLI;各自的 sandbox、approval、trust tools、team/organization 设置仍由对应 CLI 管理
 - **数据库路径**:默认 `~/.qcloop/qcloop.db`。全局 worker pool 在单个 qcloop 进程内并发 claim item;不建议多个 qcloop 进程共享同一 DB 同时写。
-- **暂停语义**:Pause 停止继续 claim 新 item,并取消当前 worker context;已取消 item 会回到 pending。
+- **暂停语义**:Pause 停止继续 claim 新 item,并取消当前 worker context;被中断的 item 会回到 pending。Cancel 才会进入不可恢复的 `canceled`。
 - **崩溃恢复**:running item 带 `lock_expires_at`,默认 15 分钟未续租会被回收到 pending,服务重启后可继续。
 
 ---
@@ -502,7 +592,7 @@ HTTP 响应状态:
 人类观察面板:http://localhost:3000
 
 - 列表页:显示所有批次,状态徽章、创建时间、测试项数
-- 详情页:统计卡片(总数/成功/失败/进行中/待处理/已耗尽/待确认)+ 表格
+- 详情页:统计卡片(总数/成功/失败/进行中/待处理/已耗尽/待确认/已取消)+ 表格
 - 每行可展开查看 attempts 和 qc_rounds 完整历史
 - 右上角 "📥 导出" 可下载 JSON/CSV/Markdown 报告
 - 详情页 "⏸ 暂停" / "▶ 恢复" 按钮仅作兜底调试;推荐由外层 AI 调 API
@@ -513,12 +603,15 @@ HTTP 响应状态:
 
 ## 11. 速查:AI agent checklist
 
-向 qcloop 提单前,检查这 7 点:
+向 qcloop 提单前,检查这 10 点:
 
 1. `prompt_template` 里有且只有 `{{item}}` 占位符
 2. 若配置 `verifier_prompt_template`,它必须返回**单一 JSON 对象**,且有 `pass` 和 `feedback` 两个字段;需要确认时加 `needs_confirmation` 和 `question`
 3. `items` 数组或 `items_text` 每行 item 适合被塞进 `{{item}}`(多数情况下是文件路径、ID、JSON object 或短字符串)
 4. `max_qc_rounds` 合理:通常 3~5。`1` 只会 worker + verifier,不会进入 repair;过大浪费 token,过小可能误判
 5. `token_budget_per_item` 合理:代码类任务给 30k~100k,文档类给 10k~30k
-6. 创建后**务必调 `/api/jobs/run`**,不然永远停在 pending;重试未成功项用 `mode=retry_unfinished`
-7. 轮询用 `/api/items/?job_id=xxx`,不要单独 GET 每个 item(后端无此端点)
+6. `max_executor_retries` 合理:推荐 1;只处理本机 AI CLI 启动/进程类错误,不要用来掩盖目标测试失败
+7. 创建后**务必调 `/api/jobs/run`**,不然永远停在 pending;重试未成功项用 `mode=retry_unfinished`
+8. 轮询用 `/api/items/?job_id=xxx`,不要单独 GET 每个 item(后端无此端点)
+9. 局部失败优先用 `/api/items/retry` 或 `/api/items/cancel`,不要因为一个 item 重建整个批次
+10. 长跑期间定期读 `/api/queue/metrics`,确认 active/pending/running/stale 指标符合预期

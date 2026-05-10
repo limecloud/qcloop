@@ -11,6 +11,7 @@ qcloop 是一个**程序驱动的批量测试编排工具**，用于自动化执
 - **不漏项** - 数据库 claim 机制，确保每个测试项都被执行
 - **可追踪** - 完整的执行历史、轮次记录
 - **多轮质检** - worker -> verifier -> repair 自动闭环
+- **AI 托管** - Skill / llm.txt 双入口,AI 自动导入 items、提单、轮询、报告
 - **可视化** - React 前端实时展示批次状态
 - **易用性** - CLI + Web 双界面
 
@@ -19,11 +20,12 @@ qcloop 是一个**程序驱动的批量测试编排工具**，用于自动化执
 ### ✅ 后端核心功能
 
 #### 1. 数据库层（SQLite）
-- [x] 4 张表结构设计
+- [x] 5 张表结构设计
   - `batch_jobs` - 批次信息
   - `batch_items` - 测试项
   - `attempts` - 执行尝试（worker/repair）
   - `qc_rounds` - 质检轮次
+  - `batch_templates` - 批次模板
 - [x] 完整的 DAO 操作（CRUD）
 - [x] 时间字段正确处理（RFC3339 格式）
 - [x] 外键约束和索引
@@ -33,7 +35,9 @@ qcloop 是一个**程序驱动的批量测试编排工具**，用于自动化执
 - [x] worker -> verifier -> repair 流程
 - [x] 自动返修机制
 - [x] 最大轮次控制（max_qc_rounds）
-- [x] 状态管理（pending/running/success/failed/exhausted/awaiting_confirmation）
+- [x] 执行器基础设施错误独立重试（max_executor_retries）
+- [x] Verifier issue ledger（qc_history / issue_ledger）
+- [x] 状态管理（pending/running/success/failed/exhausted/awaiting_confirmation/canceled）
 
 #### 3. 执行器（Executor）
 - [x] Provider Adapter 实现
@@ -50,6 +54,7 @@ qcloop 是一个**程序驱动的批量测试编排工具**，用于自动化执
   - `POST /api/jobs` - 创建批次
   - `GET /api/jobs/:id` - 获取批次详情
   - `POST /api/jobs/run` - 运行批次（后台）
+  - `POST /api/jobs/cancel` - 取消批次（不可恢复终态）
   - `GET /api/items?job_id=` - 获取批次项（含 attempts 和 qc_rounds）
 
 #### 5. CLI 命令
@@ -78,14 +83,17 @@ qcloop 是一个**程序驱动的批量测试编排工具**，用于自动化执
 
 #### 2. 批次详情页面
 - [x] 批次信息头部
-- [x] 6 个统计卡片：
+- [x] 9 个统计卡片：
   - 总数
   - 成功
   - 失败
   - 进行中
   - 待处理
   - 已耗尽
-- [x] 测试项表格（9 列）：
+  - 待确认
+  - 已取消
+  - 可重试
+- [x] 测试项表格（10 列）：
   - 序号
   - 状态
   - 阶段
@@ -95,6 +103,7 @@ qcloop 是一个**程序驱动的批量测试编排工具**，用于自动化执
   - 执行摘要
   - 变更
   - 参数
+  - 操作
 - [x] 实时状态更新（2 秒轮询）
 - [x] 运行批次按钮
 - [x] 返回列表按钮
@@ -174,7 +183,7 @@ qcloop 是一个**程序驱动的批量测试编排工具**，用于自动化执
 
 ### 1. 数据库设计
 - 使用 SQLite 轻量级数据库
-- 4 张表清晰分离关注点
+- 5 张表清晰分离关注点
 - 支持多轮质检的完整记录
 - 时间字段统一使用 RFC3339 格式
 
@@ -303,11 +312,15 @@ worker -> verifier -> repair -> verifier -> ...
 2. ~~token 预算是 schema-only~~ → Runner 真实扣减+熔断
 3. ~~暂停/恢复无 UI 入口~~ → 详情页三态按钮 + 状态徽章
 4. ~~并发执行与崩溃恢复缺失~~ → 全局 worker pool + SQLite lease + 15 分钟 stale 回收
+5. ~~批次取消缺失~~ → `/api/jobs/cancel` + Web/Skill CLI 入口
+6. ~~AI 托管收口不足~~ → `job report` + 目录/glob/git diff 导入 + issue ledger
+7. ~~单 item 重试/取消缺失~~ → `/api/items/retry|cancel` + Skill CLI + Web 行操作
+8. ~~队列指标缺失~~ → `/api/queue/metrics` + Skill CLI + Web 指标面板
+9. ~~批次模板缺失~~ → `/api/templates` CRUD + Skill CLI + Web 保存/套用/删除
 
 ### ⏳ 未开始
 - Codex `/goal` 集成:暂缓,等 /goal 从 experimental 转正
   (见 `GOAL_INTEGRATION.md` 顶部 "暂缓原因")
-- 批次取消 / 批次模板
 - 分布式执行(长期)
 
 ### ❌ 不做
@@ -317,14 +330,12 @@ worker -> verifier -> repair -> verifier -> ...
 ## 技术债务
 
 ### 已知问题(实事求是版)
-1. 批次取消仍是后续项,当前主要提供暂停/恢复与未成功项重试。
-2. 分布式执行暂不做,当前全局 worker pool 只面向单进程 qcloop。
+1. 分布式执行暂不做,当前全局 worker pool 只面向单进程 qcloop。
+2. Web 模板面板只提供保存、套用、删除；完整 update 仍优先走 Skill CLI / HTTP API。
 
 ### 改进建议
-1. 增加可配置自动重试策略,例如 worker 非 0 自动重试 1 次。
-2. 增加批次取消与更细粒度的单 item 手动重试。
-3. 暴露更多队列指标,例如活跃 worker、租约剩余时间和平均等待时间。
-4. 实现测试项详情展开，方便查看完整信息
+1. 继续完善模板版本管理和默认模板推荐。
+2. 暴露更多队列指标,例如平均等待时间和每个 worker 最近心跳。
 
 ## 项目亮点
 

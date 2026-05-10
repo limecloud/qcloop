@@ -1,4 +1,4 @@
-import type { BatchJob, BatchItem, CreateJobRequest, RunMode, UpdateJobRequest } from '../types'
+import type { BatchJob, BatchItem, BatchTemplate, CreateJobRequest, QueueMetrics, RunMode, TemplateRequest, UpdateJobRequest } from '../types'
 
 const API_BASE = '/api'
 
@@ -68,6 +68,13 @@ export const api = {
       body: JSON.stringify({ job_id: jobId }),
     }),
 
+  // 取消批次(不可恢复终态)
+  cancelJob: (jobId: string, reason = 'Web 面板取消批处理'): Promise<{ status: string }> =>
+    request<{ status: string }>('/jobs/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ job_id: jobId, reason }),
+    }),
+
   // 写回外层 AI 获取到的人类确认答案
   answerItem: (itemId: string, answer: string, resume = true): Promise<{ status: string }> =>
     request<{ status: string }>('/items/answer', {
@@ -75,7 +82,42 @@ export const api = {
       body: JSON.stringify({ item_id: itemId, answer, resume }),
     }),
 
+  retryItem: (itemId: string): Promise<{ status: string; item: BatchItem }> =>
+    request<{ status: string; item: BatchItem }>('/items/retry', {
+      method: 'POST',
+      body: JSON.stringify({ item_id: itemId }),
+    }),
+
+  cancelItem: (itemId: string, reason = 'Web 面板取消单个 item'): Promise<{ status: string; item: BatchItem }> =>
+    request<{ status: string; item: BatchItem }>('/items/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ item_id: itemId, reason }),
+    }),
+
   // 获取批次项
   listItems: (jobId: string): Promise<BatchItem[]> =>
     request<BatchItem[]>(`/items/?job_id=${jobId}`),
+
+  queueMetrics: (): Promise<QueueMetrics> =>
+    request<QueueMetrics>('/queue/metrics'),
+
+  listTemplates: (): Promise<BatchTemplate[]> =>
+    request<BatchTemplate[]>('/templates'),
+
+  createTemplate: (data: TemplateRequest): Promise<BatchTemplate> =>
+    request<BatchTemplate>('/templates', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  updateTemplate: (id: string, data: TemplateRequest): Promise<BatchTemplate> =>
+    request<BatchTemplate>(`/templates/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  deleteTemplate: (id: string): Promise<{ status: string }> =>
+    request<{ status: string }>(`/templates/${id}`, {
+      method: 'DELETE',
+    }),
 }

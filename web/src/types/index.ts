@@ -7,10 +7,11 @@ export interface BatchJob {
   verifier_prompt_template: string
   max_qc_rounds: number
   token_budget_per_item: number
+  max_executor_retries: number
   execution_mode: string // "standard" | "goal_assisted"
   executor_provider: ExecutorProvider
   run_no: number
-  status: 'pending' | 'running' | 'waiting_confirmation' | 'paused' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'waiting_confirmation' | 'paused' | 'completed' | 'failed' | 'canceled'
   created_at: string
   finished_at: string | null
 }
@@ -21,7 +22,7 @@ export interface BatchItem {
   id: string
   batch_job_id: string
   item_value: string
-  status: 'pending' | 'running' | 'success' | 'failed' | 'exhausted' | 'awaiting_confirmation'
+  status: 'pending' | 'running' | 'success' | 'failed' | 'exhausted' | 'awaiting_confirmation' | 'canceled'
   current_attempt_no: number
   current_qc_no: number
   tokens_used: number
@@ -65,12 +66,38 @@ export interface QCRound {
   finished_at: string | null
 }
 
+export interface BatchTemplate {
+  id: string
+  name: string
+  description: string
+  prompt_template: string
+  verifier_prompt_template: string
+  max_qc_rounds: number
+  token_budget_per_item: number
+  max_executor_retries: number
+  execution_mode: string
+  executor_provider: ExecutorProvider
+  items_text: string
+  created_at: string
+  updated_at: string | null
+}
+
+export interface QueueMetrics {
+  worker_count: number
+  lease_duration_seconds: number
+  poll_interval_seconds: number
+  active_items: number
+  active_jobs: number
+  items: Record<string, number>
+}
+
 export interface CreateJobRequest {
   name: string
   prompt_template: string
   verifier_prompt_template?: string
   max_qc_rounds?: number
   token_budget_per_item?: number
+  max_executor_retries?: number
   execution_mode?: string // "standard" | "goal_assisted"
   executor_provider?: ExecutorProvider
   items?: string[]
@@ -83,8 +110,22 @@ export interface UpdateJobRequest {
   verifier_prompt_template?: string
   max_qc_rounds?: number
   token_budget_per_item?: number
+  max_executor_retries?: number
   execution_mode?: string // "standard" | "goal_assisted"
   executor_provider?: ExecutorProvider
+}
+
+export interface TemplateRequest {
+  name: string
+  description?: string
+  prompt_template: string
+  verifier_prompt_template?: string
+  max_qc_rounds?: number
+  token_budget_per_item?: number
+  max_executor_retries?: number
+  execution_mode?: string
+  executor_provider?: ExecutorProvider
+  items_text?: string
 }
 
 export type RunMode = 'auto' | 'continue' | 'retry_unfinished' | 'rerun_all'

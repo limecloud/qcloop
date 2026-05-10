@@ -367,6 +367,99 @@ func TestRunBatch_RepairPromptIncludesPreviousAttemptEvidence(t *testing.T) {
 	}
 }
 
+func TestRunBatch_RetriesExecutorInfrastructureFailure(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, "", 1, []string{"retry-cli"})
+	job, _ := database.GetJob(jobID)
+	job.MaxExecutorRetries = 1
+	if err := database.UpdateJob(job); err != nil {
+		t.Fatalf("update job: %v", err)
+	}
+
+	fake := executor.NewFakeExecutor(
+		executor.FakeResponse{Stderr: "codex process failed to start", ExitCode: -1},
+		executor.FakeResponse{Stdout: "ok after retry", ExitCode: 0},
+	)
+	runner := NewRunnerWithExecutor(database, fake)
+
+	if err := runner.RunBatch(context.Background(), jobID); err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if fake.CallCount() != 2 {
+		t.Fatalf("want 2 calls after one infra retry, got %d", fake.CallCount())
+	}
+	calls := fake.Calls()
+	if !strings.Contains(calls[1].Prompt, "qcloop 自动重试上下文") {
+		t.Fatalf("retry prompt missing retry context: %q", calls[1].Prompt)
+	}
+	items, _ := database.ListItems(jobID)
+	if items[0].Status != "success" {
+		t.Fatalf("item status = %s, want success", items[0].Status)
+	}
+	attempts, err := runner.listAttempts(items[0].ID)
+	if err != nil {
+		t.Fatalf("list attempts: %v", err)
+	}
+	if len(attempts) != 2 || attempts[0].AttemptNo != 1 || attempts[1].AttemptNo != 2 {
+		t.Fatalf("attempt history = %#v, want two preserved retry attempts", attempts)
+	}
+}
+
+func TestRunBatch_VerifierReceivesQCHistoryLedger(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, `check {{item}}`, 2, []string{"ledger"})
+
+	fake := executor.NewFakeExecutor(
+		executor.FakeResponse{Stdout: "worker", ExitCode: 0},
+		executor.FakeResponse{Stdout: `{"pass": false, "feedback": "问题A未修复"}`, ExitCode: 0},
+		executor.FakeResponse{Stdout: "repair", ExitCode: 0},
+		executor.FakeResponse{Stdout: `{"pass": true, "feedback": "ok"}`, ExitCode: 0},
+	)
+	runner := NewRunnerWithExecutor(database, fake)
+
+	if err := runner.RunBatch(context.Background(), jobID); err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	calls := fake.Calls()
+	if len(calls) != 4 {
+		t.Fatalf("want worker/verifier/repair/verifier calls, got %d", len(calls))
+	}
+	if !strings.Contains(calls[3].Prompt, "qcloop 质检历史 / issue ledger") || !strings.Contains(calls[3].Prompt, "问题A未修复") {
+		t.Fatalf("second verifier prompt missing issue ledger: %q", calls[3].Prompt)
+	}
+}
+
+func TestCancelJobMarksUnfinishedItemsAndPreventsRerun(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, "", 1, []string{"done", "todo"})
+	items, _ := database.ListItems(jobID)
+	if err := database.FinishItem(items[0].ID, "success"); err != nil {
+		t.Fatalf("finish item: %v", err)
+	}
+	if err := database.StartJob(jobID); err != nil {
+		t.Fatalf("start job: %v", err)
+	}
+	if err := database.CancelJob(jobID, "用户取消睡前批处理"); err != nil {
+		t.Fatalf("cancel job: %v", err)
+	}
+
+	job, _ := database.GetJob(jobID)
+	if job.Status != "canceled" || job.FinishedAt == nil {
+		t.Fatalf("job status=%s finished=%v, want canceled with finished_at", job.Status, job.FinishedAt)
+	}
+	items, _ = database.ListItems(jobID)
+	if items[0].Status != "success" {
+		t.Fatalf("finished item should stay success, got %s", items[0].Status)
+	}
+	if items[1].Status != "canceled" || !strings.Contains(items[1].LastError, "用户取消") {
+		t.Fatalf("unfinished item = status %s last_error %q, want canceled with reason", items[1].Status, items[1].LastError)
+	}
+	runner := NewRunnerWithExecutor(database, executor.NewFakeExecutor())
+	if _, _, err := runner.PrepareRun(jobID); err == nil || !strings.Contains(err.Error(), "canceled job cannot be run") {
+		t.Fatalf("PrepareRun canceled job err = %v, want canceled guard", err)
+	}
+}
+
 func TestRunBatch_CompletedJobRerunsAllItemsAndAppendsHistory(t *testing.T) {
 	database := newTestDB(t)
 	jobID := makeJob(t, database, `check {{item}}`, 1, []string{"again"})

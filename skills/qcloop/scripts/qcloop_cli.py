@@ -10,6 +10,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
+import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -19,8 +22,9 @@ from typing import Any, Optional
 
 DEFAULT_BASE_URL = "http://127.0.0.1:3000"
 API_FALLBACK_BASE_URL = "http://127.0.0.1:8080"
-TERMINAL_STATUSES = {"completed", "failed", "paused"}
+TERMINAL_STATUSES = {"completed", "failed", "paused", "canceled"}
 RETRYABLE_ERRORS = {"CONNECTION_FAILED", "HTTP_502", "HTTP_503", "HTTP_504"}
+DEFAULT_EXCLUDED_DIRS = {".git", "node_modules", "dist", "build", "target", ".next", "coverage"}
 SKILL_CATALOG = [
     {
         "name": "qcloop",
@@ -31,7 +35,7 @@ SKILL_CATALOG = [
     },
     {
         "name": "qcloop-job",
-        "description": "qcloop 批次生命周期：create -> run -> status/wait -> retry。",
+        "description": "qcloop 批次生命周期：create -> run -> status/wait/report -> retry/cancel。",
         "recommended_command": "qcloop-skill job create --file job.json --run",
         "skill_path": "skills/qcloop/SKILL.md",
         "references": ["llms-full.txt#Core API Endpoints"],
@@ -137,7 +141,7 @@ def clip(value: str, limit: int = 800) -> str:
 
 
 def job_counts(items: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {"total": len(items), "success": 0, "failed": 0, "exhausted": 0, "awaiting_confirmation": 0, "running": 0, "pending": 0}
+    counts = {"total": len(items), "success": 0, "failed": 0, "exhausted": 0, "awaiting_confirmation": 0, "running": 0, "pending": 0, "canceled": 0}
     for item in items:
         status = item.get("status")
         if status in counts:
@@ -148,7 +152,7 @@ def job_counts(items: list[dict[str, Any]]) -> dict[str, int]:
 def problem_items(items: list[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
     problems: list[dict[str, Any]] = []
     for item in items:
-        if item.get("status") not in {"failed", "exhausted", "awaiting_confirmation"}:
+        if item.get("status") not in {"failed", "exhausted", "awaiting_confirmation", "canceled"}:
             continue
         attempts = item.get("attempts") or []
         rounds = item.get("qc_rounds") or []
@@ -199,6 +203,7 @@ def summarize_job(job: dict[str, Any], items: list[dict[str, Any]], *, problem_l
         "status": job.get("status"),
         "run_no": job.get("run_no"),
         "max_qc_rounds": job.get("max_qc_rounds"),
+        "max_executor_retries": job.get("max_executor_retries"),
         "executor_provider": job.get("executor_provider"),
         "execution_mode": job.get("execution_mode"),
         "created_at": job.get("created_at"),
@@ -213,6 +218,170 @@ def load_job_and_items(base: str, job_id: str) -> tuple[dict[str, Any], list[dic
     job = request("GET", base, f"/api/jobs/{quote(job_id)}")
     items = request("GET", base, f"/api/items/?job_id={quote(job_id)}") or []
     return job, items
+
+
+def parse_items_text(text: str | None) -> list[str]:
+    return [line.strip() for line in (text or "").splitlines() if line.strip()]
+
+
+def should_skip_dir(path: Path) -> bool:
+    return path.name in DEFAULT_EXCLUDED_DIRS
+
+
+def walk_files(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    out: list[Path] = []
+    for current, dirs, files in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in DEFAULT_EXCLUDED_DIRS]
+        current_path = Path(current)
+        if should_skip_dir(current_path):
+            continue
+        for name in files:
+            out.append(current_path / name)
+    return sorted(out)
+
+
+def collect_glob_files(cwd: Path, patterns: list[str]) -> list[Path]:
+    if not patterns:
+        return []
+    regexes = [glob_to_regex(pattern) for pattern in patterns]
+    out: list[Path] = []
+    for file in walk_files(cwd):
+        rel = file.relative_to(cwd).as_posix()
+        if any(regex.match(rel) for regex in regexes):
+            out.append(file)
+    return out
+
+
+def glob_to_regex(pattern: str) -> re.Pattern[str]:
+    normalized = pattern.replace(os.sep, "/")
+    out = "^"
+    i = 0
+    while i < len(normalized):
+        ch = normalized[i]
+        if ch == "*":
+            if i + 1 < len(normalized) and normalized[i + 1] == "*":
+                slash_after = i + 2 < len(normalized) and normalized[i + 2] == "/"
+                out += "(?:.*/)?" if slash_after else ".*"
+                i += 3 if slash_after else 2
+                continue
+            out += "[^/]*"
+        elif ch == "?":
+            out += "[^/]"
+        else:
+            out += re.escape(ch)
+        i += 1
+    out += "$"
+    return re.compile(out)
+
+
+def collect_git_diff_files(cwd: Path, ref: str | None) -> list[Path]:
+    cmd = ["git", "-C", str(cwd), "diff", "--name-only"]
+    if ref:
+        cmd.append(ref)
+    output = subprocess.check_output(cmd, text=True)
+    files: list[Path] = []
+    for line in output.splitlines():
+        rel = line.strip()
+        if not rel:
+            continue
+        file = cwd / rel
+        if file.exists():
+            files.append(file)
+    return files
+
+
+def structured_item(file: Path, cwd: Path, source: str) -> str:
+    target = file.relative_to(cwd).as_posix() if file.is_relative_to(cwd) else str(file)
+    return json.dumps(
+        {
+            "name": target,
+            "target": target,
+            "cwd": str(cwd),
+            "source": source,
+            "expected": "由外层 AI 根据当前任务意图执行该 item，并输出修改文件、验证命令、结果和风险。",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def build_imported_items(args: argparse.Namespace) -> list[str]:
+    cwd = Path(args.cwd or os.getcwd()).resolve()
+    files: dict[Path, str] = {}
+    for item_dir in args.items_dir or []:
+        root = (cwd / item_dir).resolve()
+        for file in walk_files(root):
+            files[file] = "items-dir"
+    for file in collect_glob_files(cwd, args.glob or []):
+        files[file] = "glob"
+    if args.git_diff is not None:
+        for file in collect_git_diff_files(cwd, args.git_diff):
+            files[file] = "git-diff"
+    return [structured_item(file, cwd, source) for file, source in files.items()]
+
+
+def merge_imported_items(payload: dict[str, Any], imported_items: list[str]) -> dict[str, Any]:
+    if not imported_items:
+        return payload
+    existing = payload.get("items") if isinstance(payload.get("items"), list) else parse_items_text(payload.get("items_text"))
+    out = dict(payload)
+    out["items"] = [*existing, *imported_items]
+    out.pop("items_text", None)
+    return out
+
+
+def duration_from_dates(start: str | None, end: str | None) -> str:
+    if not start:
+        return "-"
+    try:
+        started = time.mktime(time.strptime(start[:19], "%Y-%m-%dT%H:%M:%S"))
+        finished = time.mktime(time.strptime((end or time.strftime("%Y-%m-%dT%H:%M:%S"))[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return "-"
+    seconds = max(0, int(finished - started))
+    hours, rest = divmod(seconds, 3600)
+    minutes, sec = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
+def markdown_report(data: dict[str, Any]) -> str:
+    counts = data.get("counts") or {}
+    lines = [
+        f"# qcloop 托管报告: {data.get('name') or data.get('job_id')}",
+        "",
+        f"- 批次 ID: {data.get('job_id')}",
+        f"- 状态: {data.get('status')}",
+        f"- 运行轮次: {data.get('run_no')}",
+        f"- 最大质检轮次: {data.get('max_qc_rounds')}",
+        f"- 执行器失败自动重试: {data.get('max_executor_retries') or 0}",
+        f"- 已耗时: {duration_from_dates(data.get('created_at'), data.get('finished_at'))}",
+        "",
+        "| 指标 | 数量 |",
+        "| --- | ---: |",
+    ]
+    for key in ["total", "success", "failed", "exhausted", "awaiting_confirmation", "running", "pending", "canceled"]:
+        lines.append(f"| {key} | {counts.get(key, 0)} |")
+    if data.get("awaiting_confirmations"):
+        lines.extend(["", "## 待确认"])
+        for item in data["awaiting_confirmations"]:
+            lines.append(f"- {item.get('item_id')}: {item.get('question') or item.get('item_value')}")
+    if data.get("problems"):
+        lines.extend(["", "## 问题项"])
+        for item in data["problems"]:
+            lines.append(f"- {item.get('item_id')} [{item.get('status')}] {item.get('item_value')}")
+            if item.get("last_feedback"):
+                lines.append(f"  - 质检反馈: {str(item.get('last_feedback')).replace(chr(10), ' ')}")
+            if item.get("last_stderr"):
+                lines.append(f"  - stderr: {str(item.get('last_stderr')).replace(chr(10), ' ')}")
+            if item.get("confirmation_question"):
+                lines.append(f"  - 待确认: {str(item.get('confirmation_question')).replace(chr(10), ' ')}")
+    return "\n".join(lines) + "\n"
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -266,12 +435,14 @@ def cmd_job_list(args: argparse.Namespace) -> int:
 def cmd_job_create(args: argparse.Namespace) -> int:
     with open(args.file, "r", encoding="utf-8") as fh:
         payload = json.load(fh)
+    imported_items = build_imported_items(args)
+    payload = merge_imported_items(payload, imported_items)
     base = resolve_base_url(args.base_url)
     job = request("POST", base, "/api/jobs", payload)
     run_result = None
     if args.run:
         run_result = request("POST", base, "/api/jobs/run", {"job_id": job["id"], "mode": args.mode})
-    emit(envelope("job create", job, run_result=run_result, dashboard_url=f"{base}/?job_id={job['id']}"))
+    emit(envelope("job create", job, run_result=run_result, imported_item_count=len(imported_items), dashboard_url=f"{base}/?job_id={job['id']}"))
     return 0
 
 
@@ -290,6 +461,12 @@ def cmd_job_pause(args: argparse.Namespace) -> int:
 def cmd_job_resume(args: argparse.Namespace) -> int:
     result = request("POST", resolve_base_url(args.base_url), "/api/jobs/resume", {"job_id": args.job_id})
     emit(envelope("job resume", result, job_id=args.job_id))
+    return 0
+
+
+def cmd_job_cancel(args: argparse.Namespace) -> int:
+    result = request("POST", resolve_base_url(args.base_url), "/api/jobs/cancel", {"job_id": args.job_id, "reason": args.reason})
+    emit(envelope("job cancel", result, job_id=args.job_id))
     return 0
 
 
@@ -321,6 +498,18 @@ def cmd_job_wait(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+def cmd_job_report(args: argparse.Namespace) -> int:
+    base = resolve_base_url(args.base_url)
+    job, items = load_job_and_items(base, args.job_id)
+    data: dict[str, Any] = summarize_job(job, items, problem_limit=args.problem_limit)
+    if args.format == "markdown":
+        data["markdown"] = markdown_report(data)
+    elif args.format != "json":
+        raise CliError("INVALID_ARGUMENT", "--format 只能是 json 或 markdown", exit_code=64)
+    emit(envelope("job report", data, dashboard_url=f"{base}/?job_id={args.job_id}"))
+    return 0
+
+
 def cmd_item_answer(args: argparse.Namespace) -> int:
     payload = {
         "item_id": args.item_id,
@@ -329,6 +518,58 @@ def cmd_item_answer(args: argparse.Namespace) -> int:
     }
     result = request("POST", resolve_base_url(args.base_url), "/api/items/answer", payload)
     emit(envelope("item answer", result, item_id=args.item_id, resumed=args.resume))
+    return 0
+
+
+def cmd_item_retry(args: argparse.Namespace) -> int:
+    result = request("POST", resolve_base_url(args.base_url), "/api/items/retry", {"item_id": args.item_id})
+    emit(envelope("item retry", result, item_id=args.item_id))
+    return 0
+
+
+def cmd_item_cancel(args: argparse.Namespace) -> int:
+    result = request("POST", resolve_base_url(args.base_url), "/api/items/cancel", {"item_id": args.item_id, "reason": args.reason})
+    emit(envelope("item cancel", result, item_id=args.item_id))
+    return 0
+
+
+def cmd_template_list(args: argparse.Namespace) -> int:
+    templates = request("GET", resolve_base_url(args.base_url), "/api/templates") or []
+    emit(envelope("template list", templates, count=len(templates)))
+    return 0
+
+
+def cmd_template_show(args: argparse.Namespace) -> int:
+    template = request("GET", resolve_base_url(args.base_url), f"/api/templates/{quote(args.template_id)}")
+    emit(envelope("template show", template))
+    return 0
+
+
+def cmd_template_create(args: argparse.Namespace) -> int:
+    with open(args.file, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    template = request("POST", resolve_base_url(args.base_url), "/api/templates", payload)
+    emit(envelope("template create", template))
+    return 0
+
+
+def cmd_template_update(args: argparse.Namespace) -> int:
+    with open(args.file, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    template = request("PUT", resolve_base_url(args.base_url), f"/api/templates/{quote(args.template_id)}", payload)
+    emit(envelope("template update", template))
+    return 0
+
+
+def cmd_template_delete(args: argparse.Namespace) -> int:
+    result = request("DELETE", resolve_base_url(args.base_url), f"/api/templates/{quote(args.template_id)}")
+    emit(envelope("template delete", result, template_id=args.template_id))
+    return 0
+
+
+def cmd_queue_metrics(args: argparse.Namespace) -> int:
+    metrics = request("GET", resolve_base_url(args.base_url), "/api/queue/metrics")
+    emit(envelope("queue metrics", metrics))
     return 0
 
 
@@ -366,7 +607,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qcloop-skill",
         description="qcloop 技能 CLI，默认输出结构化 JSON，供 AI 智能体/技能调用。",
-        epilog="常用流程：doctor -> job create --file job.json --run -> job wait <job_id> -> item answer <item_id> --answer ... --resume",
+        epilog="常用流程：doctor -> job create --file job.json --run -> job wait <job_id> -> job report <job_id> --format markdown -> item answer <item_id> --answer ... --resume",
     )
     add_common(parser)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -391,6 +632,10 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--file", required=True, help="批次 payload JSON 文件")
     create.add_argument("--run", action="store_true", help="创建后立即入队")
     create.add_argument("--mode", default="auto", help="启动模式：auto/continue/retry_unfinished/rerun_all")
+    create.add_argument("--cwd", help="导入 items 时使用的项目根目录，默认当前目录")
+    create.add_argument("--items-dir", action="append", help="把目录下文件导入为结构化 items，可重复")
+    create.add_argument("--glob", action="append", help="按 glob 导入文件，如 **/*.md，可重复")
+    create.add_argument("--git-diff", help="导入 git diff --name-only <ref> 的文件")
     create.set_defaults(func=cmd_job_create)
 
     run = job_sub.add_parser("run", help="启动、继续或重跑批次")
@@ -406,6 +651,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("job_id")
     resume.set_defaults(func=cmd_job_resume)
 
+    cancel = job_sub.add_parser("cancel", help="取消批次，进入不可恢复终态")
+    cancel.add_argument("job_id")
+    cancel.add_argument("--reason", default="外层 AI 取消批处理")
+    cancel.set_defaults(func=cmd_job_cancel)
+
     status = job_sub.add_parser("status", help="读取批次摘要和失败证据")
     status.add_argument("job_id")
     status.add_argument("--include-items", action="store_true", help="包含完整 items/attempts/qc_rounds")
@@ -419,6 +669,12 @@ def build_parser() -> argparse.ArgumentParser:
     wait.add_argument("--problem-limit", type=int, default=20)
     wait.set_defaults(func=cmd_job_wait)
 
+    report = job_sub.add_parser("report", help="生成睡前托管报告")
+    report.add_argument("job_id")
+    report.add_argument("--format", choices=["json", "markdown"], default="json")
+    report.add_argument("--problem-limit", type=int, default=50)
+    report.set_defaults(func=cmd_job_report)
+
     item = sub.add_parser("item", help="qcloop 单 item 自动化命令")
     item_sub = item.add_subparsers(dest="item_command", required=True)
     answer = item_sub.add_parser("answer", help="写回人类确认答案并可恢复 item")
@@ -426,6 +682,36 @@ def build_parser() -> argparse.ArgumentParser:
     answer.add_argument("--answer", required=True, help="外层 AI 从人类处获得的确认答案")
     answer.add_argument("--resume", action="store_true", help="写回答案后立即重新入队")
     answer.set_defaults(func=cmd_item_answer)
+    retry = item_sub.add_parser("retry", help="重试单个 item")
+    retry.add_argument("item_id")
+    retry.set_defaults(func=cmd_item_retry)
+    cancel_item = item_sub.add_parser("cancel", help="取消单个 item")
+    cancel_item.add_argument("item_id")
+    cancel_item.add_argument("--reason", default="外层 AI 取消单个 item")
+    cancel_item.set_defaults(func=cmd_item_cancel)
+
+    template = sub.add_parser("template", help="管理 qcloop 批次模板")
+    template_sub = template.add_subparsers(dest="template_command", required=True)
+    template_list = template_sub.add_parser("list", help="列出批次模板")
+    template_list.set_defaults(func=cmd_template_list)
+    template_show = template_sub.add_parser("show", help="显示批次模板")
+    template_show.add_argument("template_id")
+    template_show.set_defaults(func=cmd_template_show)
+    template_create = template_sub.add_parser("create", help="从 JSON 文件创建批次模板")
+    template_create.add_argument("--file", required=True, help="模板 payload JSON 文件")
+    template_create.set_defaults(func=cmd_template_create)
+    template_update = template_sub.add_parser("update", help="更新批次模板")
+    template_update.add_argument("template_id")
+    template_update.add_argument("--file", required=True, help="模板 payload JSON 文件")
+    template_update.set_defaults(func=cmd_template_update)
+    template_delete = template_sub.add_parser("delete", help="删除批次模板")
+    template_delete.add_argument("template_id")
+    template_delete.set_defaults(func=cmd_template_delete)
+
+    queue = sub.add_parser("queue", help="查看 qcloop 队列指标")
+    queue_sub = queue.add_subparsers(dest="queue_command", required=True)
+    metrics = queue_sub.add_parser("metrics", help="输出队列指标")
+    metrics.set_defaults(func=cmd_queue_metrics)
 
     skill = sub.add_parser("skill", help="查看 qcloop 技能目录")
     skill_sub = skill.add_subparsers(dest="skill_command", required=True)

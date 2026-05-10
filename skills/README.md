@@ -1,6 +1,6 @@
 # qcloop 技能
 
-本目录存放面向 AI agent 的 qcloop 技能包。它的目标不是替代 Web 面板，而是让 Codex / Claude Code / Gemini CLI / Kiro CLI 这类外层 agent 可以稳定地：读取 qcloop 运行说明、创建批次、启动队列、轮询状态、必要时向人类确认并写回答案、汇总证据。
+本目录存放面向 AI agent 的 qcloop 技能包。它的目标不是替代 Web 面板，而是让 Codex / Claude Code / Gemini CLI / Kiro CLI 这类外层 agent 可以稳定地：读取 qcloop 运行说明、从目录/glob/git diff 导入 items、创建批次、启动队列、轮询状态、必要时向人类确认并写回答案、局部重试/取消 item、读取队列指标、复用模板、汇总报告或取消批次。
 
 ## 当前技能
 
@@ -15,8 +15,13 @@
 qcloop-skill doctor
 qcloop-skill guide --full --raw
 qcloop-skill job create --file /tmp/qcloop-job.json --run
+qcloop-skill job create --file /tmp/qcloop-job.json --cwd "$PWD" --glob "docs/**/*.md" --run
 qcloop-skill job wait <job_id> --timeout 1800
+qcloop-skill job report <job_id> --format markdown
 qcloop-skill item answer <item_id> --answer "允许继续，但不要提交" --resume
+qcloop-skill item retry <item_id>
+qcloop-skill queue metrics
+qcloop-skill template list
 qcloop-skill skill list
 
 # 仓库内置版本
@@ -25,6 +30,7 @@ skills/qcloop/bin/qcloop-skill guide --full --raw
 skills/qcloop/bin/qcloop-skill job create --file /tmp/qcloop-job.json --run
 skills/qcloop/bin/qcloop-skill job wait <job_id> --timeout 1800
 skills/qcloop/bin/qcloop-skill item answer <item_id> --answer "允许继续，但不要提交" --resume
+skills/qcloop/bin/qcloop-skill queue metrics
 skills/qcloop/bin/qcloop-skill skill list
 ```
 

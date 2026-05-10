@@ -17,10 +17,11 @@ type BatchJob struct {
 	VerifierPromptTemplate string     `json:"verifier_prompt_template"`
 	MaxQCRounds            int        `json:"max_qc_rounds"`
 	TokenBudgetPerItem     int        `json:"token_budget_per_item"` // 每个 item 的 token 预算
+	MaxExecutorRetries     int        `json:"max_executor_retries"`  // 执行器基础设施错误的自动重试次数
 	ExecutionMode          string     `json:"execution_mode"`        // standard | goal_assisted
 	ExecutorProvider       string     `json:"executor_provider"`     // codex | claude_code | gemini_cli | kiro_cli
 	RunNo                  int        `json:"run_no"`                // 当前运行轮次,从 1 开始
-	Status                 string     `json:"status"`                // pending/running/waiting_confirmation/completed/failed/paused
+	Status                 string     `json:"status"`                // pending/running/waiting_confirmation/completed/failed/paused/canceled
 	CreatedAt              time.Time  `json:"created_at"`
 	FinishedAt             *time.Time `json:"finished_at"`
 }
@@ -30,7 +31,7 @@ type BatchItem struct {
 	ID                   string     `json:"id"`
 	BatchJobID           string     `json:"batch_job_id"`
 	ItemValue            string     `json:"item_value"`
-	Status               string     `json:"status"` // pending/running/success/failed/exhausted/awaiting_confirmation
+	Status               string     `json:"status"` // pending/running/success/failed/exhausted/awaiting_confirmation/canceled
 	CurrentAttemptNo     int        `json:"current_attempt_no"`
 	CurrentQCNo          int        `json:"current_qc_no"`
 	TokensUsed           int        `json:"tokens_used"`           // 已使用的 token 数量
@@ -75,4 +76,21 @@ type QCRound struct {
 	TokensUsed        int        `json:"tokens_used"` // 本次质检使用的 token 数量
 	StartedAt         time.Time  `json:"started_at"`
 	FinishedAt        *time.Time `json:"finished_at"`
+}
+
+// BatchTemplate 批次模板,供 AI agent 复用常见 QA loop 配置。
+type BatchTemplate struct {
+	ID                     string     `json:"id"`
+	Name                   string     `json:"name"`
+	Description            string     `json:"description"`
+	PromptTemplate         string     `json:"prompt_template"`
+	VerifierPromptTemplate string     `json:"verifier_prompt_template"`
+	MaxQCRounds            int        `json:"max_qc_rounds"`
+	TokenBudgetPerItem     int        `json:"token_budget_per_item"`
+	MaxExecutorRetries     int        `json:"max_executor_retries"`
+	ExecutionMode          string     `json:"execution_mode"`
+	ExecutorProvider       string     `json:"executor_provider"`
+	ItemsText              string     `json:"items_text"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              *time.Time `json:"updated_at"`
 }

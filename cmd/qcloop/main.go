@@ -50,6 +50,12 @@ var statusCmd = &cobra.Command{
 	RunE:  runStatus,
 }
 
+var cancelCmd = &cobra.Command{
+	Use:   "cancel",
+	Short: "取消批次",
+	RunE:  runCancel,
+}
+
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "启动 HTTP API 服务器",
@@ -63,11 +69,13 @@ var (
 	createItems          string
 	createMaxQCRounds    int
 	createTokenBudget    int
+	createMaxExecRetries int
 	createExecutionMode  string
 	createExecutor       string
 
 	runJobID     string
 	statusJobID  string
+	cancelJobID  string
 	serveAddr    string
 	serveWorkers int
 )
@@ -81,6 +89,7 @@ func init() {
 	createCmd.Flags().StringVar(&createItems, "items", "", "测试项列表，逗号分隔（必填）")
 	createCmd.Flags().IntVar(&createMaxQCRounds, "max-qc-rounds", 3, "最大质检轮次")
 	createCmd.Flags().IntVar(&createTokenBudget, "token-budget", 0, "每个 item 的 token 预算，超出后标记 exhausted；0 表示不限制")
+	createCmd.Flags().IntVar(&createMaxExecRetries, "max-executor-retries", 1, "本机 AI CLI 基础设施错误自动重试次数(0-5)")
 	createCmd.Flags().StringVar(&createExecutionMode, "execution-mode", "standard", "执行模式:standard | goal_assisted(Codex Goal 风格 prompt 包装)")
 	createCmd.Flags().StringVar(&createExecutor, "executor-provider", "", "执行器:codex | claude_code | gemini_cli | kiro_cli；空值使用 QCLOOP_EXECUTOR_PROVIDER 或 codex")
 	createCmd.MarkFlagRequired("name")
@@ -93,12 +102,16 @@ func init() {
 	statusCmd.Flags().StringVar(&statusJobID, "job-id", "", "批次 ID（必填）")
 	statusCmd.MarkFlagRequired("job-id")
 
+	cancelCmd.Flags().StringVar(&cancelJobID, "job-id", "", "批次 ID（必填）")
+	cancelCmd.MarkFlagRequired("job-id")
+
 	serveCmd.Flags().StringVar(&serveAddr, "addr", ":8080", "服务器地址")
 	serveCmd.Flags().IntVar(&serveWorkers, "workers", defaultWorkerCount(), "全局队列并发 worker 数")
 
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(cancelCmd)
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -136,6 +149,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		VerifierPromptTemplate: createVerifierPrompt,
 		MaxQCRounds:            createMaxQCRounds,
 		TokenBudgetPerItem:     createTokenBudget,
+		MaxExecutorRetries:     createMaxExecRetries,
 		ExecutionMode:          createExecutionMode,
 		ExecutorProvider:       provider,
 		Status:                 "pending",
@@ -165,6 +179,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("批次名称: %s\n", createName)
 	fmt.Printf("测试项数: %d\n", len(items))
 	fmt.Printf("最大质检轮次: %d\n", createMaxQCRounds)
+	fmt.Printf("执行器失败重试: %d\n", createMaxExecRetries)
 	fmt.Printf("执行器: %s\n", provider)
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
@@ -250,6 +265,30 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runCancel(cmd *cobra.Command, args []string) error {
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+
+	job, err := database.GetJob(cancelJobID)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return fmt.Errorf("批次不存在: %s", cancelJobID)
+	}
+	if job.Status == "completed" || job.Status == "failed" || job.Status == "canceled" {
+		return fmt.Errorf("终态批次不能取消: %s", job.Status)
+	}
+	if err := database.CancelJob(cancelJobID, "qcloop CLI cancel"); err != nil {
+		return err
+	}
+	fmt.Printf("⛔ 批次已取消: %s\n", job.Name)
+	return nil
+}
+
 func runServe(cmd *cobra.Command, args []string) error {
 	database, err := db.Open(dbPath)
 	if err != nil {
@@ -272,7 +311,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	fmt.Println("  POST   /api/jobs/run      - 运行批次")
 	fmt.Println("  POST   /api/jobs/pause    - 暂停批次")
 	fmt.Println("  POST   /api/jobs/resume   - 恢复批次")
+	fmt.Println("  POST   /api/jobs/cancel   - 取消批次")
+	fmt.Println("  POST   /api/items/retry   - 重试单个 item")
+	fmt.Println("  POST   /api/items/cancel  - 取消单个 item")
 	fmt.Println("  GET    /api/items?job_id= - 获取批次项")
+	fmt.Println("  GET    /api/queue/metrics - 获取队列指标")
+	fmt.Println("  GET    /api/templates     - 管理批次模板")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	return http.ListenAndServe(serveAddr, server)

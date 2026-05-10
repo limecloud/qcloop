@@ -1,14 +1,14 @@
 import type { BatchItem } from '../types'
 
 // 从累计历史里切出“本轮”记录。后端 run_no 是事实源,避免重跑后靠时间猜测。
-export function currentRunAttempts(item: BatchItem, runNo?: number, maxQCRounds?: number) {
+export function currentRunAttempts(item: BatchItem, runNo?: number, _maxQCRounds?: number) {
   const attempts = item.attempts || []
   const currentRunNo = normalizeRunNo(runNo)
   const runAttempts = attempts.filter((attempt) => normalizeRunNo(attempt.run_no) === currentRunNo)
   const count = normalizeCurrentCount(
     item.current_attempt_no,
     runAttempts.length,
-    maxRunAttempts(maxQCRounds),
+    undefined,
   )
   if (count === 0) return []
   return runAttempts.slice(-count)
@@ -25,11 +25,6 @@ export function currentRunQCRounds(item: BatchItem, runNo?: number, maxQCRounds?
   )
   if (count === 0) return []
   return runRounds.slice(-count)
-}
-
-function maxRunAttempts(maxQCRounds?: number) {
-  if (!maxQCRounds || maxQCRounds <= 0) return undefined
-  return Math.max(1, maxQCRounds)
 }
 
 function normalizeCurrentCount(rawCount: number, historyLength: number, cap?: number) {

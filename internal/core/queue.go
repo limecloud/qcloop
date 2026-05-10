@@ -39,6 +39,15 @@ type QueueManager struct {
 	active   map[string]map[string]context.CancelFunc // jobID -> itemID -> cancel
 }
 
+type QueueMetrics struct {
+	WorkerCount          int            `json:"worker_count"`
+	LeaseDurationSeconds int            `json:"lease_duration_seconds"`
+	PollIntervalSeconds  int            `json:"poll_interval_seconds"`
+	ActiveItems          int            `json:"active_items"`
+	ActiveJobs           int            `json:"active_jobs"`
+	Items                map[string]int `json:"items"`
+}
+
 func NewQueueManager(database *db.DB, runner *Runner, options QueueOptions) *QueueManager {
 	if options.WorkerCount <= 0 {
 		options.WorkerCount = DefaultWorkerCount
@@ -98,6 +107,74 @@ func (q *QueueManager) PauseJob(jobID string) error {
 	q.cancelJob(jobID)
 	q.runner.emitJobUpdate(jobID)
 	return nil
+}
+
+func (q *QueueManager) CancelJob(jobID, reason string) error {
+	job, err := q.database.GetJob(jobID)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return fmt.Errorf("job not found")
+	}
+	if job.Status == "completed" || job.Status == "failed" || job.Status == "canceled" {
+		return fmt.Errorf("terminal job cannot be canceled")
+	}
+	q.cancelJob(jobID)
+	if err := q.database.CancelJob(jobID, reason); err != nil {
+		return err
+	}
+	q.runner.emitJobUpdate(jobID)
+	return nil
+}
+
+func (q *QueueManager) CancelItem(itemID, reason string) (*db.BatchItem, error) {
+	item, err := q.database.GetItem(itemID)
+	if err != nil || item == nil {
+		return item, err
+	}
+	job, err := q.database.GetJob(item.BatchJobID)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, fmt.Errorf("job not found")
+	}
+	if job.Status == "completed" || job.Status == "failed" || job.Status == "canceled" {
+		return nil, fmt.Errorf("terminal job item cannot be canceled")
+	}
+	q.cancelItem(item.BatchJobID, itemID)
+	fresh, err := q.database.CancelItem(itemID, reason)
+	if err != nil {
+		return nil, err
+	}
+	q.runner.emitItemUpdate(item.BatchJobID, itemID)
+	if done, _, err := q.database.FinishJobIfDone(item.BatchJobID); err != nil {
+		return fresh, err
+	} else if done {
+		q.runner.emitJobUpdate(item.BatchJobID)
+	} else if changed, _, err := q.database.ReconcileJobStatusIfDone(item.BatchJobID); err != nil {
+		return fresh, err
+	} else if changed {
+		q.runner.emitJobUpdate(item.BatchJobID)
+	}
+	return fresh, nil
+}
+
+func (q *QueueManager) Metrics() (*QueueMetrics, error) {
+	items, err := q.database.QueueMetrics(time.Now())
+	if err != nil {
+		return nil, err
+	}
+	activeItems, activeJobs := q.activeCounts()
+	return &QueueMetrics{
+		WorkerCount:          q.options.WorkerCount,
+		LeaseDurationSeconds: int(q.options.LeaseDuration.Seconds()),
+		PollIntervalSeconds:  int(q.options.PollInterval.Seconds()),
+		ActiveItems:          activeItems,
+		ActiveJobs:           activeJobs,
+		Items:                items,
+	}, nil
 }
 
 func (q *QueueManager) ResumeJob(jobID string) (string, error) {
@@ -229,6 +306,25 @@ func (q *QueueManager) cancelJob(jobID string) {
 	for _, cancel := range q.active[jobID] {
 		cancel()
 	}
+}
+
+func (q *QueueManager) cancelItem(jobID, itemID string) {
+	q.activeMu.Lock()
+	defer q.activeMu.Unlock()
+	if cancel := q.active[jobID][itemID]; cancel != nil {
+		cancel()
+	}
+}
+
+func (q *QueueManager) activeCounts() (int, int) {
+	q.activeMu.Lock()
+	defer q.activeMu.Unlock()
+	activeJobs := len(q.active)
+	activeItems := 0
+	for _, items := range q.active {
+		activeItems += len(items)
+	}
+	return activeItems, activeJobs
 }
 
 func (q *QueueManager) cancelAll() {

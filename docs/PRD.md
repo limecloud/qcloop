@@ -111,13 +111,14 @@ qcloop status --job-id <id>
 ```
 
 **Web 方式**：
-- 批次表格视图（9 列）
-- 统计卡片（6 个指标）
-- 实时更新（2s 轮询）
+- 批次表格视图（10 列，含单 item 操作）
+- 统计卡片（9 个核心指标）
+- 队列指标面板与批次模板面板
+- 实时更新（WebSocket 优先，轮询兜底）
 
 **显示内容**：
-- 批次整体状态（pending/running/waiting_confirmation/completed/failed）
-- 测试项统计（总数/成功/失败/进行中/待处理/已耗尽）
+- 批次整体状态（pending/running/waiting_confirmation/completed/failed/canceled）
+- 测试项统计（总数/成功/失败/进行中/待处理/已耗尽/待确认/已取消）
 - 每个 item 的详细状态
 
 ### 2.4 HTTP API
@@ -131,7 +132,11 @@ qcloop serve --addr :8080
 - `POST /api/jobs` - 创建批次
 - `GET /api/jobs/:id` - 获取批次
 - `POST /api/jobs/run` - 入队/运行批次(`mode`: auto/continue/retry_unfinished/rerun_all)
+- `POST /api/jobs/pause` / `POST /api/jobs/resume` / `POST /api/jobs/cancel` - 暂停、恢复、不可恢复取消
 - `GET /api/items?job_id=` - 获取批次项（含 attempts 和 qc_rounds）
+- `POST /api/items/retry` / `POST /api/items/cancel` - 单 item 重试或取消
+- `GET /api/queue/metrics` - 获取 worker、active、pending/running/stale 等队列指标
+- `/api/templates` / `/api/templates/:id` - 批次模板 CRUD
 
 ## 3. 数据模型
 
@@ -145,7 +150,12 @@ CREATE TABLE batch_jobs (
     prompt_template TEXT NOT NULL,
     verifier_prompt_template TEXT,
     max_qc_rounds INTEGER NOT NULL DEFAULT 3,
-    status TEXT NOT NULL,  -- pending/running/waiting_confirmation/completed/failed
+    token_budget_per_item INTEGER NOT NULL DEFAULT 0,
+    max_executor_retries INTEGER NOT NULL DEFAULT 1,
+    execution_mode TEXT NOT NULL DEFAULT 'standard',
+    executor_provider TEXT NOT NULL DEFAULT 'codex',
+    run_no INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL,  -- pending/running/waiting_confirmation/completed/failed/canceled
     created_at TEXT NOT NULL,
     finished_at TEXT
 );
@@ -157,9 +167,16 @@ CREATE TABLE batch_items (
     id TEXT PRIMARY KEY,
     batch_job_id TEXT NOT NULL,
     item_value TEXT NOT NULL,
-    status TEXT NOT NULL,  -- pending/running/success/failed/exhausted/awaiting_confirmation
+    status TEXT NOT NULL,  -- pending/running/success/failed/exhausted/awaiting_confirmation/canceled
     current_attempt_no INTEGER NOT NULL DEFAULT 0,
     current_qc_no INTEGER NOT NULL DEFAULT 0,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    lock_owner TEXT,
+    lock_expires_at TEXT,
+    queued_at TEXT,
+    last_error TEXT,
+    confirmation_question TEXT,
+    confirmation_answer TEXT,
     created_at TEXT NOT NULL,
     finished_at TEXT,
     FOREIGN KEY (batch_job_id) REFERENCES batch_jobs(id)
@@ -200,6 +217,25 @@ CREATE TABLE qc_rounds (
 );
 ```
 
+#### batch_templates 表
+```sql
+CREATE TABLE batch_templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    prompt_template TEXT NOT NULL,
+    verifier_prompt_template TEXT,
+    max_qc_rounds INTEGER NOT NULL DEFAULT 3,
+    token_budget_per_item INTEGER NOT NULL DEFAULT 0,
+    max_executor_retries INTEGER NOT NULL DEFAULT 1,
+    execution_mode TEXT NOT NULL DEFAULT 'standard',
+    executor_provider TEXT NOT NULL DEFAULT 'codex',
+    items_text TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+);
+```
+
 ### 3.2 数据模型关系图
 
 ```mermaid
@@ -207,6 +243,7 @@ erDiagram
     BATCH_JOBS ||--o{ BATCH_ITEMS : contains
     BATCH_ITEMS ||--o{ ATTEMPTS : has
     BATCH_ITEMS ||--o{ QC_ROUNDS : has
+    BATCH_TEMPLATES ||--o{ BATCH_JOBS : creates
     
     BATCH_JOBS {
         string id PK
@@ -244,6 +281,13 @@ erDiagram
         string verdict
         string feedback
     }
+
+    BATCH_TEMPLATES {
+        string id PK
+        string name
+        string prompt_template
+        string items_text
+    }
 ```
 
 ## 4. 技术架构
@@ -271,7 +315,7 @@ graph TB
     
     subgraph "存储层"
         DAO[DAO 层]
-        DB[(SQLite<br/>4 张表)]
+        DB[(SQLite<br/>5 张表)]
     end
     
     CLI --> Runner
@@ -433,8 +477,8 @@ sequenceDiagram
 - ✅ 批次列表显示：名称、ID、状态、测试项数、质检轮次、创建时间、完成时间
 - ✅ 状态标签清晰（待处理/运行中/全部通过/未全部通过）
 - ✅ 可以点击"查看详情"进入批次详情页
-- ✅ 详情页显示统计卡片（总数/成功/失败/进行中/待处理/已耗尽）
-- ✅ 详情页显示测试项表格（9 列）
+- ✅ 详情页显示统计卡片（总数/成功/失败/进行中/待处理/已耗尽/待确认/已取消/可重试）
+- ✅ 详情页显示测试项表格（10 列，含单 item 操作）
 
 ### 5.4 作为开发者，我想了解每个测试项的执行细节
 
@@ -532,8 +576,8 @@ sequenceDiagram
 
 **关键信息**：
 - 批次头部：显示批次名称、ID、操作按钮
-- 统计卡片：6 个指标（总数/成功/失败/进行中/待处理/已耗尽）
-- 测试项表格：9 列详细信息
+- 统计卡片：9 个核心指标（总数/成功/失败/进行中/待处理/已耗尽/待确认/已取消/可重试）
+- 测试项表格：10 列详细信息，含单 item 重试 / 取消
 
 ### 6.3 批次表格视图
 
@@ -665,7 +709,7 @@ qcloop/
 
 ### Stage 1: 数据库层（已完成）
 - ✅ SQLite 连接管理
-- ✅ 4 张表结构
+- ✅ 5 张表结构
 - ✅ DAO CRUD 操作
 
 ### Stage 2: 编排引擎（已完成）
@@ -785,18 +829,25 @@ npm run dev
 ### 10.1 已完成 ✅
 
 **核心能力**
-- [x] SQLite 持久化(4 张表:jobs/items/attempts/qc_rounds)
+- [x] SQLite 持久化(5 张表:jobs/items/attempts/qc_rounds/templates)
 - [x] Runner 多轮质检循环(worker → verifier → repair,`max_qc_rounds` 硬停止)
 - [x] **Token 预算真实扣减 + 超预算 → exhausted 熔断**
 - [x] **Codex Goal 集成(阶段 1:`execution_mode=goal_assisted` 注入 Goal 风格 prompt)**
 - [x] Provider Adapter(支持 `codex exec` / `claude -p` / `gemini -p` / `kiro-cli chat --no-interactive`)
+- [x] **执行器基础设施错误独立重试**(`max_executor_retries`,不占用质检轮次)
+- [x] **Verifier issue ledger**(`{{qc_history}}` / `{{issue_ledger}}`,旧问题/新问题可追踪)
 - [x] Executor 接口 + FakeExecutor + provider 参数构造测试 + 集成测试全绿
 - [x] CLI 命令:`create` / `run` / `status` / `serve`
+- [x] Skill CLI 文件导入: `--items-dir` / `--glob` / `--git-diff`
+- [x] Skill CLI 睡前托管报告:`job report --format markdown`
+- [x] Skill CLI 单 item 重试/取消、队列指标、模板 CRUD
 
 **Web 前端**
 - [x] 批次列表页(名称 / ID / 状态 / 项数 / 质检轮次 / 时间)
-- [x] 批次详情页(统计卡片 + 9 列表格 + 执行摘要标签)
-- [x] **批次暂停/恢复按钮 + 状态徽章**
+- [x] 批次详情页(统计卡片 + 10 列表格 + 执行摘要标签)
+- [x] **批次暂停/恢复/取消按钮 + 状态徽章**
+- [x] 队列指标面板 + 批次模板保存/套用/删除
+- [x] 单 item 重试/取消行操作
 - [x] 创建批次模态框(含 token 预算、执行模式、执行器选项)
 - [x] 测试项详情可展开(attempt/qc_round 完整历史)
 - [x] 结果导出(JSON / CSV / Markdown)
@@ -804,11 +855,12 @@ npm run dev
 **后端 API**
 - [x] RESTful `/api/jobs` CRUD
 - [x] `POST /api/jobs/run` 入队后由全局 worker pool 后台运行
-- [x] `POST /api/jobs/pause` + `POST /api/jobs/resume` + 未成功项重试
+- [x] `POST /api/jobs/pause` + `POST /api/jobs/resume` + `POST /api/jobs/cancel` + 未成功项重试
+- [x] `POST /api/items/retry` + `POST /api/items/cancel`
+- [x] `GET /api/queue/metrics`
+- [x] `/api/templates` CRUD
 - [x] WebSocket Hub(`/ws`) + Runner 事件广播 + 前端 `useLiveItems`(WS 优先 + 轮询兜底)
 - [x] 全局 worker pool 默认并发 2 个 item + SQLite lease + 15 分钟 stale running 回收
-
-### 10.2 半完成(需要继续的具体缺口)🔶
 
 ### 10.2 半完成(需要继续的具体缺口)🔶
 
@@ -830,8 +882,10 @@ npm run dev
 **中期**
 - [x] ~~并发执行(`concurrency > 1`,claim 机制 + lease)~~(已完成:全局 worker pool 默认 2)
 - [x] ~~崩溃恢复(lease 过期回收 in-flight item)~~(已完成:15 分钟 stale 回收)
-- [ ] 批次取消(区别于暂停:不可恢复)
-- [ ] 批次模板管理
+- [x] ~~批次取消(区别于暂停:不可恢复)~~(已完成)
+- [x] ~~批次模板管理~~(已完成:API/Skill CLI CRUD + Web 轻量入口)
+- [x] ~~单 item 重试/取消~~(已完成)
+- [x] ~~队列指标~~(已完成)
 - [ ] Codex Goal 集成阶段 2:接 app-server `thread/goal/*` 拿真实 tokensUsed
 
 **长期 / 受外部依赖**

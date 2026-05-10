@@ -9,6 +9,7 @@ export function exportToJSON(job: BatchJob, items: BatchItem[]): void {
       prompt_template: job.prompt_template,
       verifier_prompt_template: job.verifier_prompt_template,
       max_qc_rounds: job.max_qc_rounds,
+      max_executor_retries: job.max_executor_retries,
       execution_mode: job.execution_mode,
       executor_provider: job.executor_provider,
       status: job.status,
@@ -34,6 +35,7 @@ export function exportToJSON(job: BatchJob, items: BatchItem[]): void {
       pending: items.filter((i) => i.status === 'pending').length,
       exhausted: items.filter((i) => i.status === 'exhausted').length,
       awaiting_confirmation: items.filter((i) => i.status === 'awaiting_confirmation').length,
+      canceled: items.filter((i) => i.status === 'canceled').length,
     },
     exported_at: new Date().toISOString(),
   }
@@ -116,8 +118,9 @@ export function exportToMarkdown(job: BatchJob, items: BatchItem[]): void {
     failed: items.filter((i) => i.status === 'failed').length,
     running: items.filter((i) => i.status === 'running').length,
     pending: items.filter((i) => i.status === 'pending').length,
-      exhausted: items.filter((i) => i.status === 'exhausted').length,
-      awaiting_confirmation: items.filter((i) => i.status === 'awaiting_confirmation').length,
+    exhausted: items.filter((i) => i.status === 'exhausted').length,
+    awaiting_confirmation: items.filter((i) => i.status === 'awaiting_confirmation').length,
+    canceled: items.filter((i) => i.status === 'canceled').length,
   }
 
   const content = `# qcloop 批次报告
@@ -132,6 +135,7 @@ export function exportToMarkdown(job: BatchJob, items: BatchItem[]): void {
 - **创建时间**: ${job.created_at ? new Date(job.created_at).toLocaleString('zh-CN') : '-'}
 - **完成时间**: ${job.finished_at ? new Date(job.finished_at).toLocaleString('zh-CN') : '-'}
 - **最大质检轮次**: ${job.max_qc_rounds}
+- **执行器失败自动重试**: ${job.max_executor_retries ?? 0}
 
 ## 统计摘要
 
@@ -144,6 +148,7 @@ export function exportToMarkdown(job: BatchJob, items: BatchItem[]): void {
 | ⏳ 待处理 | ${stats.pending} | ${((stats.pending / stats.total) * 100).toFixed(1)}% |
 | ⚠️ 已耗尽 | ${stats.exhausted} | ${((stats.exhausted / stats.total) * 100).toFixed(1)}% |
 | ❓ 待确认 | ${stats.awaiting_confirmation} | ${((stats.awaiting_confirmation / stats.total) * 100).toFixed(1)}% |
+| ⛔ 已取消 | ${stats.canceled} | ${((stats.canceled / stats.total) * 100).toFixed(1)}% |
 
 ## 测试项详情
 

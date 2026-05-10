@@ -1,26 +1,29 @@
 import { useState } from 'react'
 import { api } from '../api'
-import type { BatchJob, ExecutorProvider } from '../types'
+import type { BatchJob, BatchTemplate, ExecutorProvider } from '../types'
 
 interface Props {
   onCreated?: (job: BatchJob) => void
   onUpdated?: (job: BatchJob) => void
   initialJob?: BatchJob
+  initialTemplate?: BatchTemplate | null
 }
 
-export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
+export function CreateJobForm({ onCreated, onUpdated, initialJob, initialTemplate }: Props) {
   const editing = Boolean(initialJob)
-  const [name, setName] = useState(initialJob?.name || '')
-  const [promptTemplate, setPromptTemplate] = useState(initialJob?.prompt_template || '')
-  const [verifierPrompt, setVerifierPrompt] = useState(initialJob?.verifier_prompt_template || '')
-  const [itemsText, setItemsText] = useState('')
-  const [maxQCRounds, setMaxQCRounds] = useState(initialJob?.max_qc_rounds || 3)
-  const [tokenBudget, setTokenBudget] = useState(initialJob?.token_budget_per_item || 0)
+  const seed = initialJob || initialTemplate || null
+  const [name, setName] = useState(seed?.name || '')
+  const [promptTemplate, setPromptTemplate] = useState(seed?.prompt_template || '')
+  const [verifierPrompt, setVerifierPrompt] = useState(seed?.verifier_prompt_template || '')
+  const [itemsText, setItemsText] = useState(initialTemplate?.items_text || '')
+  const [maxQCRounds, setMaxQCRounds] = useState(seed?.max_qc_rounds || 3)
+  const [tokenBudget, setTokenBudget] = useState(seed?.token_budget_per_item || 0)
+  const [maxExecutorRetries, setMaxExecutorRetries] = useState(seed?.max_executor_retries ?? 1)
   const [executionMode, setExecutionMode] = useState<'standard' | 'goal_assisted'>(
-    initialJob?.execution_mode === 'goal_assisted' ? 'goal_assisted' : 'standard',
+    seed?.execution_mode === 'goal_assisted' ? 'goal_assisted' : 'standard',
   )
   const [executorProvider, setExecutorProvider] = useState<ExecutorProvider>(
-    initialJob?.executor_provider || 'codex',
+    seed?.executor_provider || 'codex',
   )
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -37,6 +40,7 @@ export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
         verifier_prompt_template: verifierPrompt || undefined,
         max_qc_rounds: maxQCRounds,
         token_budget_per_item: tokenBudget || undefined,
+        max_executor_retries: maxExecutorRetries,
         execution_mode: executionMode,
         executor_provider: executorProvider,
       }
@@ -137,6 +141,21 @@ export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
           min={0}
           style={{ ...inputStyle, width: '160px' }}
         />
+      </div>
+
+      <div style={fieldStyle}>
+        <label style={labelStyle}>执行器失败自动重试次数</label>
+        <input
+          type="number"
+          value={maxExecutorRetries}
+          onChange={(e) => setMaxExecutorRetries(Number(e.target.value))}
+          min={0}
+          max={5}
+          style={{ ...inputStyle, width: '120px' }}
+        />
+        <div style={helpTextStyle}>
+          只重试本机 AI CLI 启动/进程类基础设施错误，不把目标测试失败伪装成重试。
+        </div>
       </div>
 
       <div style={fieldStyle}>

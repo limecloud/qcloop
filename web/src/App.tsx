@@ -3,7 +3,7 @@ import { CreateJobForm } from './components/CreateJobForm'
 import { BatchTable } from './components/BatchTable'
 import { useLiveItems } from './hooks/useLiveItems'
 import { api } from './api'
-import type { BatchJob, BatchItem, RunMode } from './types'
+import type { BatchJob, BatchItem, BatchTemplate, QueueMetrics, RunMode } from './types'
 import { exportToJSON, exportToCSV, exportToMarkdown } from './utils/export'
 
 const JOB_ID_QUERY_KEY = 'job_id'
@@ -42,6 +42,9 @@ export function App() {
   const [urlJobId, setUrlJobId] = useState(() => readJobIdFromUrl())
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [editingJob, setEditingJob] = useState<BatchJob | null>(null)
+  const [templateDraft, setTemplateDraft] = useState<BatchTemplate | null>(null)
+  const [templates, setTemplates] = useState<BatchTemplate[]>([])
+  const [queueMetrics, setQueueMetrics] = useState<QueueMetrics | null>(null)
   const [jobPage, setJobPage] = useState(1)
   const [running, setRunning] = useState(false)
   const { items, loading, mode } = useLiveItems(currentJob?.id || '', 3000)
@@ -89,6 +92,32 @@ export function App() {
     return () => clearInterval(timer)
   }, [urlJobId])
 
+  const loadTemplates = useCallback(async () => {
+    try {
+      setTemplates(await api.listTemplates())
+    } catch (err) {
+      console.error('加载批次模板失败:', err)
+    }
+  }, [])
+
+  const loadQueueMetrics = useCallback(async () => {
+    try {
+      setQueueMetrics(await api.queueMetrics())
+    } catch (err) {
+      console.error('加载队列指标失败:', err)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadTemplates()
+  }, [loadTemplates])
+
+  useEffect(() => {
+    loadQueueMetrics()
+    const timer = setInterval(loadQueueMetrics, 5000)
+    return () => clearInterval(timer)
+  }, [loadQueueMetrics])
+
   useEffect(() => {
     if (!currentJob?.id) return
     const jobId = currentJob.id
@@ -121,6 +150,7 @@ export function App() {
     setJobs([...jobs, job])
     selectJob(job)
     setShowCreateForm(false)
+    setTemplateDraft(null)
   }
 
   const handleUpdateJob = (job: BatchJob) => {
@@ -202,14 +232,111 @@ export function App() {
     }
   }
 
+  const handleCancel = async () => {
+    if (!currentJob) return
+    const confirmed = window.confirm(`确认取消批次「${currentJob.name}」？取消会终止未完成 item，且不能恢复，只能重新创建或删除。`)
+    if (!confirmed) return
+    try {
+      await api.cancelJob(currentJob.id)
+      setRunning(false)
+      setCurrentJob((prev) => prev ? { ...prev, status: 'canceled', finished_at: new Date().toISOString() } : prev)
+      setJobs((prev) => prev.map((job) => (
+        job.id === currentJob.id ? { ...job, status: 'canceled', finished_at: new Date().toISOString() } : job
+      )))
+    } catch (err) {
+      console.error(err)
+      window.alert(err instanceof Error ? err.message : '取消失败')
+    }
+  }
+
+  const handleSaveTemplate = async () => {
+    if (!currentJob) return
+    try {
+      const template = await api.createTemplate({
+        name: `${currentJob.name} 模板`,
+        description: '从 Web 当前批次保存，供外层 AI 后续复用。',
+        prompt_template: currentJob.prompt_template,
+        verifier_prompt_template: currentJob.verifier_prompt_template,
+        max_qc_rounds: currentJob.max_qc_rounds,
+        token_budget_per_item: currentJob.token_budget_per_item,
+        max_executor_retries: currentJob.max_executor_retries,
+        execution_mode: currentJob.execution_mode,
+        executor_provider: currentJob.executor_provider,
+        items_text: items.map((item) => item.item_value).join('\n'),
+      })
+      setTemplates((prev) => [template, ...prev.filter((item) => item.id !== template.id)])
+      window.alert('已保存为批次模板。')
+    } catch (err) {
+      console.error(err)
+      window.alert(err instanceof Error ? err.message : '保存模板失败')
+    }
+  }
+
+  const handleUseTemplate = (template: BatchTemplate) => {
+    setTemplateDraft(template)
+    setEditingJob(null)
+    setShowCreateForm(true)
+  }
+
+  const handleDeleteTemplate = async (template: BatchTemplate) => {
+    const confirmed = window.confirm(`确认删除模板「${template.name}」？`)
+    if (!confirmed) return
+    try {
+      await api.deleteTemplate(template.id)
+      setTemplates((prev) => prev.filter((item) => item.id !== template.id))
+    } catch (err) {
+      console.error(err)
+      window.alert(err instanceof Error ? err.message : '删除模板失败')
+    }
+  }
+
+  const syncCurrentJob = async () => {
+    if (!currentJob) return
+    try {
+      const job = await api.getJob(currentJob.id)
+      applyJobSnapshot(job)
+    } catch (err) {
+      console.error('同步当前批次失败:', err)
+    }
+  }
+
+  const handleRetryItem = async (item: BatchItem) => {
+    const label = item.status === 'success' ? '重跑此成功项' : '重试此 item'
+    const confirmed = window.confirm(`${label}？历史记录会保留，新尝试会追加到同一 item。`)
+    if (!confirmed) return
+    try {
+      await api.retryItem(item.id)
+      setRunning(true)
+      await syncCurrentJob()
+    } catch (err) {
+      console.error(err)
+      window.alert(err instanceof Error ? err.message : '重试 item 失败')
+    }
+  }
+
+  const handleCancelItem = async (item: BatchItem) => {
+    const confirmed = window.confirm(`确认取消 item「${item.item_value.slice(0, 80)}」？`)
+    if (!confirmed) return
+    try {
+      await api.cancelItem(item.id)
+      await syncCurrentJob()
+    } catch (err) {
+      console.error(err)
+      window.alert(err instanceof Error ? err.message : '取消 item 失败')
+    }
+  }
+
   // 根据当前 job 的状态决定显示"运行/暂停/恢复"中的哪个主按钮
   const jobStatus = currentJob?.status
-  const isTerminal = jobStatus === 'completed' || jobStatus === 'failed'
+  const isCanceled = jobStatus === 'canceled'
+  const isTerminal = jobStatus === 'completed' || jobStatus === 'failed' || isCanceled
   const isActive = jobStatus === 'running' || (running && !isTerminal)
   const isPaused = jobStatus === 'paused'
   const isWaitingConfirmation = jobStatus === 'waiting_confirmation'
   const unfinishedCount = items.filter((item) => item.status !== 'success').length
-  const runButtonLabel = jobStatus === 'waiting_confirmation'
+  const runButtonLabel = isCanceled
+    ? '已取消'
+    : jobStatus === 'waiting_confirmation'
     ? '等待 AI 确认'
     : isTerminal
     ? (unfinishedCount > 0 ? `↻ 重试未成功项 (${unfinishedCount})` : '↻ 重新运行全部')
@@ -235,8 +362,9 @@ export function App() {
     pending: items.filter((i) => i.status === 'pending').length,
     exhausted: items.filter((i) => i.status === 'exhausted').length,
     awaiting: items.filter((i) => i.status === 'awaiting_confirmation').length,
+    canceled: items.filter((i) => i.status === 'canceled').length,
   }
-  const terminalProblemCount = stats.failed + stats.exhausted
+  const terminalProblemCount = stats.failed + stats.exhausted + stats.canceled
   const jobPageCount = Math.max(1, Math.ceil(jobs.length / JOB_PAGE_SIZE))
   const safeJobPage = Math.min(jobPage, jobPageCount)
   const jobPageStart = (safeJobPage - 1) * JOB_PAGE_SIZE
@@ -268,7 +396,10 @@ export function App() {
           </p>
         </div>
         <button
-          onClick={() => setShowCreateForm(true)}
+          onClick={() => {
+            setTemplateDraft(null)
+            setShowCreateForm(true)
+          }}
           style={{
             padding: '12px 20px',
             backgroundColor: '#111827',
@@ -292,11 +423,13 @@ export function App() {
             onClick={() => {
               setShowCreateForm(false)
               setEditingJob(null)
+              setTemplateDraft(null)
             }}
           >
             <div style={modalContentStyle} onClick={(e) => e.stopPropagation()}>
               <CreateJobForm
                 initialJob={editingJob || undefined}
+                initialTemplate={templateDraft}
                 onCreated={handleCreateJob}
                 onUpdated={handleUpdateJob}
               />
@@ -304,6 +437,7 @@ export function App() {
                 onClick={() => {
                   setShowCreateForm(false)
                   setEditingJob(null)
+                  setTemplateDraft(null)
                 }}
                 style={{
                   marginTop: '16px',
@@ -370,20 +504,53 @@ export function App() {
                 ) : (
                   <button
                     onClick={handleRun}
-                    disabled={isWaitingConfirmation}
+                    disabled={isWaitingConfirmation || isCanceled}
                     style={{
                       padding: '10px 18px',
-                      backgroundColor: isWaitingConfirmation ? '#e5e7eb' : '#2d7a2d',
+                      backgroundColor: isWaitingConfirmation || isCanceled ? '#e5e7eb' : '#2d7a2d',
                       color: '#fff',
                       border: 'none',
                       borderRadius: '4px',
-                      cursor: isWaitingConfirmation ? 'not-allowed' : 'pointer',
+                      cursor: isWaitingConfirmation || isCanceled ? 'not-allowed' : 'pointer',
                       fontSize: '18px',
                     }}
                   >
                     {runButtonLabel}
                   </button>
                 )}
+                {!isTerminal || isPaused || isWaitingConfirmation ? (
+                  <button
+                    onClick={handleCancel}
+                    disabled={isCanceled}
+                    style={{
+                      padding: '10px 18px',
+                      backgroundColor: '#fff7ed',
+                      color: '#c2410c',
+                      border: '1px solid #fed7aa',
+                      borderRadius: '4px',
+                      cursor: isCanceled ? 'not-allowed' : 'pointer',
+                      fontSize: '18px',
+                      fontWeight: 700,
+                    }}
+                  >
+                    取消批次
+                  </button>
+                ) : null}
+                <button
+                  onClick={handleSaveTemplate}
+                  style={{
+                    padding: '10px 18px',
+                    backgroundColor: '#f8fafc',
+                    color: '#334155',
+                    border: '1px solid #d7dde7',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontSize: '18px',
+                    fontWeight: 700,
+                  }}
+                >
+                  保存模板
+                </button>
                 <ExportMenu job={currentJob} items={items} />
                 <button
                   onClick={() => setEditingJob(currentJob)}
@@ -441,6 +608,7 @@ export function App() {
               <StatCard label="待处理" value={stats.pending} color="#666" />
               <StatCard label="已耗尽" value={stats.exhausted} color="#f57c00" />
               <StatCard label="待确认" value={stats.awaiting} color="#1d4ed8" />
+              <StatCard label="已取消" value={stats.canceled} color="#c2410c" />
               <StatCard label="可重试" value={unfinishedCount} color="#1976d2" />
             </div>
 
@@ -458,7 +626,7 @@ export function App() {
               <div style={terminalWarningStyle}>
                 <strong>本批次未全部通过。</strong>
                 {' '}
-                当前有 {terminalProblemCount} 个失败或已耗尽项；
+                当前有 {terminalProblemCount} 个失败、已耗尽或已取消项；
                 {currentJob.max_qc_rounds <= 1
                   ? '最大质检轮次为 1，质检未通过时不会进入 repair。建议调到 3-5 轮后重试未成功项。'
                   : '可以先查看展开明细里的 verifier feedback，再重试未成功项。'}
@@ -471,75 +639,165 @@ export function App() {
                   加载中...
                 </div>
               ) : (
-                <BatchTable items={items} maxQCRounds={currentJob.max_qc_rounds} runNo={currentJob.run_no} />
+                <BatchTable
+                  items={items}
+                  maxQCRounds={currentJob.max_qc_rounds}
+                  runNo={currentJob.run_no}
+                  jobStatus={currentJob.status}
+                  onRetryItem={handleRetryItem}
+                  onCancelItem={handleCancelItem}
+                />
               )}
             </div>
           </>
         ) : (
-          <div style={tableContainerStyle}>
-            <div style={{ padding: '24px' }}>
-              <h3 style={{ margin: '0 0 18px', fontSize: '26px', color: '#111827', fontWeight: 800, letterSpacing: '-0.02em' }}>
-                批次列表
-              </h3>
-              {jobs.length === 0 ? (
-                <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>
-                  暂无批次，点击右上角"新建批次"按钮创建
-                </div>
-              ) : (
-                <>
-                  <JobPaginationBar
-                    page={safeJobPage}
-                    pageCount={jobPageCount}
-                    total={jobs.length}
-                    pageStart={jobPageStart}
-                    pageSize={JOB_PAGE_SIZE}
-                    onPageChange={setJobPage}
-                  />
-                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                    <thead>
-                      <tr style={{ backgroundColor: '#f9f9f9', borderBottom: '1px solid #e0e0e0' }}>
-                        <th style={thStyle}>批次名称</th>
-                        <th style={thStyle}>批次 ID</th>
-                        <th style={thStyle}>状态</th>
-                        <th style={thStyle}>执行器</th>
-                        <th style={thStyle}>测试项</th>
-                        <th style={thStyle}>质检轮次</th>
-                        <th style={thStyle}>创建时间</th>
-                        <th style={thStyle}>完成时间</th>
-                        <th style={thStyle}>操作</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pageJobs.map((job) => (
-                        <JobRow
-                          key={job.id}
-                          job={job}
-                          onSelect={selectJob}
-                          onEdit={setEditingJob}
-                          onDelete={handleDeleteJob}
-                        />
-                      ))}
-                    </tbody>
-                  </table>
-                  <JobPaginationBar
-                    page={safeJobPage}
-                    pageCount={jobPageCount}
-                    total={jobs.length}
-                    pageStart={jobPageStart}
-                    pageSize={JOB_PAGE_SIZE}
-                    onPageChange={setJobPage}
-                  />
-                </>
-              )}
+          <>
+            <QueueMetricsPanel metrics={queueMetrics} />
+            <TemplatePanel templates={templates} onUse={handleUseTemplate} onDelete={handleDeleteTemplate} />
+            <div style={tableContainerStyle}>
+              <div style={{ padding: '24px' }}>
+                <h3 style={{ margin: '0 0 18px', fontSize: '26px', color: '#111827', fontWeight: 800, letterSpacing: '-0.02em' }}>
+                  批次列表
+                </h3>
+                {jobs.length === 0 ? (
+                  <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>
+                    暂无批次，点击右上角"新建批次"按钮创建
+                  </div>
+                ) : (
+                  <>
+                    <JobPaginationBar
+                      page={safeJobPage}
+                      pageCount={jobPageCount}
+                      total={jobs.length}
+                      pageStart={jobPageStart}
+                      pageSize={JOB_PAGE_SIZE}
+                      onPageChange={setJobPage}
+                    />
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ backgroundColor: '#f9f9f9', borderBottom: '1px solid #e0e0e0' }}>
+                          <th style={thStyle}>批次名称</th>
+                          <th style={thStyle}>批次 ID</th>
+                          <th style={thStyle}>状态</th>
+                          <th style={thStyle}>执行器</th>
+                          <th style={thStyle}>测试项</th>
+                          <th style={thStyle}>质检轮次</th>
+                          <th style={thStyle}>创建时间</th>
+                          <th style={thStyle}>完成时间</th>
+                          <th style={thStyle}>操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pageJobs.map((job) => (
+                          <JobRow
+                            key={job.id}
+                            job={job}
+                            onSelect={selectJob}
+                            onEdit={setEditingJob}
+                            onDelete={handleDeleteJob}
+                          />
+                        ))}
+                      </tbody>
+                    </table>
+                    <JobPaginationBar
+                      page={safeJobPage}
+                      pageCount={jobPageCount}
+                      total={jobs.length}
+                      pageStart={jobPageStart}
+                      pageSize={JOB_PAGE_SIZE}
+                      onPageChange={setJobPage}
+                    />
+                  </>
+                )}
+              </div>
             </div>
-          </div>
+          </>
         )}
       </div>
     </div>
   )
 }
 
-// JobStatusBadge 显示批次本身的状态(pending/running/paused/completed/failed)
+function QueueMetricsPanel({ metrics }: { metrics: QueueMetrics | null }) {
+  const items = metrics?.items || {}
+  return (
+    <section style={panelStyle}>
+      <div>
+        <h3 style={panelTitleStyle}>队列指标</h3>
+        <p style={panelSubtitleStyle}>给外层 AI 判断是否真的在跑、是否卡住、是否需要断点继续。</p>
+      </div>
+      <div style={queueMetricGridStyle}>
+        <MiniMetric label="活跃 item" value={metrics?.active_items ?? 0} />
+        <MiniMetric label="活跃批次" value={metrics?.active_jobs ?? 0} />
+        <MiniMetric label="worker" value={metrics?.worker_count ?? 0} />
+        <MiniMetric label="队列中" value={items.pending_items ?? 0} />
+        <MiniMetric label="运行中" value={items.running_items ?? 0} />
+        <MiniMetric label="待确认" value={items.awaiting_confirmation_items ?? 0} />
+        <MiniMetric label="已卡住" value={items.stale_running_items ?? 0} tone="warning" />
+      </div>
+    </section>
+  )
+}
+
+function TemplatePanel({
+  templates,
+  onUse,
+  onDelete,
+}: {
+  templates: BatchTemplate[]
+  onUse: (template: BatchTemplate) => void
+  onDelete: (template: BatchTemplate) => void
+}) {
+  return (
+    <section style={panelStyle}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '16px' }}>
+        <div>
+          <h3 style={panelTitleStyle}>批次模板</h3>
+          <p style={panelSubtitleStyle}>模板让 AI 复用常见 review / smoke / docs repair 配置；Web 可保存、套用、删除，完整 CRUD 走 Skill CLI/API。</p>
+        </div>
+        <span style={panelCountStyle}>{templates.length} 个模板</span>
+      </div>
+      {templates.length === 0 ? (
+        <div style={emptyPanelTextStyle}>暂无模板。打开任一批次详情，点击“保存模板”即可沉淀一套配置。</div>
+      ) : (
+        <div style={templateListStyle}>
+          {templates.slice(0, 6).map((template) => (
+            <div key={template.id} style={templateCardStyle}>
+              <div style={{ minWidth: 0 }}>
+                <strong style={templateNameStyle}>{template.name}</strong>
+                <div style={templateMetaStyle}>
+                  {template.executor_provider} · 质检 {template.max_qc_rounds} 轮 · 重试 {template.max_executor_retries} 次
+                </div>
+                {template.description ? <div style={templateDescStyle}>{template.description}</div> : null}
+              </div>
+              <div style={templateActionsStyle}>
+                <button type="button" onClick={() => onUse(template)} style={smallPrimaryButtonStyle}>
+                  套用
+                </button>
+                <button type="button" onClick={() => onDelete(template)} style={smallDangerButtonStyle}>
+                  删除
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function MiniMetric({ label, value, tone = 'normal' }: { label: string; value: number; tone?: 'normal' | 'warning' }) {
+  return (
+    <div style={miniMetricStyle}>
+      <span style={miniMetricLabelStyle}>{label}</span>
+      <strong style={{ ...miniMetricValueStyle, color: tone === 'warning' && value > 0 ? '#c2410c' : '#111827' }}>
+        {value}
+      </strong>
+    </div>
+  )
+}
+
+// JobStatusBadge 显示批次本身的状态(pending/running/paused/completed/failed/canceled)
 function JobStatusBadge({ status }: { status: string }) {
   const styles: Record<string, { bg: string; color: string; label: string }> = {
     pending: { bg: '#f5f5f5', color: '#666', label: '待运行' },
@@ -548,6 +806,7 @@ function JobStatusBadge({ status }: { status: string }) {
     paused: { bg: '#fff4e1', color: '#f57c00', label: '已暂停' },
     completed: { bg: '#e1ffe1', color: '#2d7a2d', label: '全部通过' },
     failed: { bg: '#ffe1e1', color: '#d32f2f', label: '未全部通过' },
+    canceled: { bg: '#fff7ed', color: '#c2410c', label: '已取消' },
   }
   const s = styles[status] || styles.pending
   return (
@@ -571,12 +830,12 @@ function LongRunOverview({
   stats,
 }: {
   job: BatchJob
-  stats: { total: number; success: number; failed: number; running: number; pending: number; exhausted: number; awaiting: number }
+  stats: { total: number; success: number; failed: number; running: number; pending: number; exhausted: number; awaiting: number; canceled: number }
 }) {
   const startedAt = new Date(job.created_at).getTime()
   const endAt = job.finished_at ? new Date(job.finished_at).getTime() : Date.now()
   const elapsedSeconds = Math.max(0, Math.round((endAt - startedAt) / 1000))
-  const settled = stats.success + stats.failed + stats.exhausted
+  const settled = stats.success + stats.failed + stats.exhausted + stats.canceled
   const avgSeconds = settled > 0 ? elapsedSeconds / settled : 0
   const runnableRemaining = stats.pending + stats.running
   const etaSeconds = avgSeconds > 0 && runnableRemaining > 0 ? Math.round(avgSeconds * runnableRemaining) : null
@@ -750,6 +1009,7 @@ function JobRow({
       paused: '已暂停',
       completed: '全部通过',
       failed: '未全部通过',
+      canceled: '已取消',
     }
     return labels[status] || status
   }
@@ -762,6 +1022,7 @@ function JobRow({
       paused: { bg: '#fff4e1', color: '#f57c00' },
       completed: { bg: '#e1ffe1', color: '#2d7a2d' },
       failed: { bg: '#ffe1e1', color: '#b91c1c' },
+      canceled: { bg: '#fff7ed', color: '#c2410c' },
     }
     return colors[status] || colors.pending
   }
@@ -903,6 +1164,141 @@ const statsStyle: React.CSSProperties = {
   borderRadius: '24px',
   boxShadow: '0 14px 36px rgba(15, 23, 42, 0.04)',
   marginBottom: '18px',
+}
+
+const panelStyle: React.CSSProperties = {
+  padding: '20px 24px',
+  backgroundColor: '#fff',
+  border: '1px solid #edf1f5',
+  borderRadius: '24px',
+  boxShadow: '0 14px 36px rgba(15, 23, 42, 0.04)',
+  marginBottom: '18px',
+}
+
+const panelTitleStyle: React.CSSProperties = {
+  margin: 0,
+  color: '#111827',
+  fontSize: '24px',
+  fontWeight: 900,
+  letterSpacing: '-0.02em',
+}
+
+const panelSubtitleStyle: React.CSSProperties = {
+  margin: '6px 0 0',
+  color: '#64748b',
+  fontSize: '17px',
+  fontWeight: 600,
+}
+
+const panelCountStyle: React.CSSProperties = {
+  color: '#475569',
+  fontSize: '17px',
+  fontWeight: 800,
+}
+
+const queueMetricGridStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
+  gap: '12px',
+  marginTop: '16px',
+}
+
+const miniMetricStyle: React.CSSProperties = {
+  padding: '12px 14px',
+  border: '1px solid #e5eaf2',
+  borderRadius: '18px',
+  backgroundColor: '#f8fafc',
+}
+
+const miniMetricLabelStyle: React.CSSProperties = {
+  display: 'block',
+  color: '#64748b',
+  fontSize: '14px',
+  fontWeight: 800,
+}
+
+const miniMetricValueStyle: React.CSSProperties = {
+  display: 'block',
+  marginTop: '4px',
+  fontSize: '24px',
+  fontWeight: 900,
+}
+
+const emptyPanelTextStyle: React.CSSProperties = {
+  marginTop: '14px',
+  color: '#94a3b8',
+  fontSize: '17px',
+  fontWeight: 700,
+}
+
+const templateListStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+  gap: '12px',
+  marginTop: '16px',
+}
+
+const templateCardStyle: React.CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  gap: '14px',
+  padding: '14px',
+  border: '1px solid #e5eaf2',
+  borderRadius: '18px',
+  backgroundColor: '#fbfcfe',
+}
+
+const templateNameStyle: React.CSSProperties = {
+  display: 'block',
+  color: '#111827',
+  fontSize: '18px',
+  fontWeight: 900,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+}
+
+const templateMetaStyle: React.CSSProperties = {
+  marginTop: '5px',
+  color: '#64748b',
+  fontSize: '14px',
+  fontWeight: 800,
+}
+
+const templateDescStyle: React.CSSProperties = {
+  marginTop: '6px',
+  color: '#475569',
+  fontSize: '14px',
+  lineHeight: 1.45,
+}
+
+const templateActionsStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '8px',
+  flexShrink: 0,
+}
+
+const smallPrimaryButtonStyle: React.CSSProperties = {
+  padding: '8px 12px',
+  backgroundColor: '#111827',
+  color: '#fff',
+  border: 'none',
+  borderRadius: '999px',
+  cursor: 'pointer',
+  fontSize: '15px',
+  fontWeight: 800,
+}
+
+const smallDangerButtonStyle: React.CSSProperties = {
+  padding: '8px 12px',
+  backgroundColor: '#fff1f2',
+  color: '#b91c1c',
+  border: '1px solid #fecdd3',
+  borderRadius: '999px',
+  cursor: 'pointer',
+  fontSize: '15px',
+  fontWeight: 800,
 }
 
 const terminalWarningStyle: React.CSSProperties = {

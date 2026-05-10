@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS batch_jobs (
     verifier_prompt_template TEXT,
     max_qc_rounds INTEGER NOT NULL DEFAULT 3,
     token_budget_per_item INTEGER NOT NULL DEFAULT 0,
+    max_executor_retries INTEGER NOT NULL DEFAULT 1,
     execution_mode TEXT NOT NULL DEFAULT 'standard',
     executor_provider TEXT NOT NULL DEFAULT 'codex',
     run_no INTEGER NOT NULL DEFAULT 1,
@@ -76,6 +77,25 @@ CREATE INDEX IF NOT EXISTS idx_batch_items_status ON batch_items(batch_job_id, s
 CREATE INDEX IF NOT EXISTS idx_attempts_item ON attempts(batch_item_id);
 CREATE INDEX IF NOT EXISTS idx_qc_rounds_item ON qc_rounds(batch_item_id);
 
+-- 批次模板表
+CREATE TABLE IF NOT EXISTS batch_templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    prompt_template TEXT NOT NULL,
+    verifier_prompt_template TEXT,
+    max_qc_rounds INTEGER NOT NULL DEFAULT 3,
+    token_budget_per_item INTEGER NOT NULL DEFAULT 0,
+    max_executor_retries INTEGER NOT NULL DEFAULT 1,
+    execution_mode TEXT NOT NULL DEFAULT 'standard',
+    executor_provider TEXT NOT NULL DEFAULT 'codex',
+    items_text TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_batch_templates_name ON batch_templates(name);
+
 -- 幂等 migration:若已有旧表缺列,补加
 `
 
@@ -83,6 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_qc_rounds_item ON qc_rounds(batch_item_id);
 // 每条都允许失败(列已存在时 sqlite 会报错),调用方忽略错误即可。
 var MigrationStatements = []string{
 	`ALTER TABLE batch_jobs ADD COLUMN token_budget_per_item INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE batch_jobs ADD COLUMN max_executor_retries INTEGER NOT NULL DEFAULT 1`,
 	`ALTER TABLE batch_jobs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'standard'`,
 	`ALTER TABLE batch_jobs ADD COLUMN executor_provider TEXT NOT NULL DEFAULT 'codex'`,
 	`ALTER TABLE batch_jobs ADD COLUMN run_no INTEGER NOT NULL DEFAULT 1`,

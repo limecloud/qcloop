@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -179,6 +180,90 @@ func TestRecoverStaleRunningItemsRequeuesExpiredLease(t *testing.T) {
 	}
 }
 
+func TestQueueManagerCancelItemMarksFailedJobAndDoesNotRequeue(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, "", 1, []string{"slow"})
+	fake := &blockingExecutor{delay: 200 * time.Millisecond}
+	runner := NewRunnerWithExecutor(database, fake)
+	queue := NewQueueManager(database, runner, QueueOptions{
+		WorkerCount:   1,
+		LeaseDuration: time.Second,
+		PollInterval:  5 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queue.Start(ctx)
+	defer queue.Stop()
+
+	if _, err := queue.EnqueueJob(jobID, RunModeAuto); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	item := waitForFirstItemStatus(t, database, jobID, "running", time.Second)
+	fresh, err := queue.CancelItem(item.ID, "用户跳过该项")
+	if err != nil {
+		t.Fatalf("CancelItem: %v", err)
+	}
+	if fresh.Status != "canceled" {
+		t.Fatalf("fresh status = %s, want canceled", fresh.Status)
+	}
+	waitForJobStatus(t, database, jobID, "failed", time.Second)
+	fresh, _ = database.GetItem(item.ID)
+	if fresh.Status != "canceled" {
+		t.Fatalf("item status after runner returned = %s, want canceled", fresh.Status)
+	}
+	if fresh.LastError != "用户跳过该项" {
+		t.Fatalf("last_error = %q, want cancel reason", fresh.LastError)
+	}
+}
+
+func TestQueueManagerMetricsExposeActiveAndPersistedCounts(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, "", 1, []string{"a", "b"})
+	fake := &blockingExecutor{delay: 150 * time.Millisecond}
+	runner := NewRunnerWithExecutor(database, fake)
+	queue := NewQueueManager(database, runner, QueueOptions{
+		WorkerCount:   1,
+		LeaseDuration: time.Second,
+		PollInterval:  5 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queue.Start(ctx)
+	defer queue.Stop()
+
+	if _, err := queue.EnqueueJob(jobID, RunModeAuto); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	_ = waitForFirstItemStatus(t, database, jobID, "running", time.Second)
+	metrics, err := queue.Metrics()
+	if err != nil {
+		t.Fatalf("Metrics: %v", err)
+	}
+	if metrics.WorkerCount != 1 || metrics.LeaseDurationSeconds != 1 {
+		t.Fatalf("queue options not reflected: %#v", metrics)
+	}
+	if metrics.ActiveItems != 1 || metrics.ActiveJobs != 1 {
+		t.Fatalf("active counts = items:%d jobs:%d, want 1/1", metrics.ActiveItems, metrics.ActiveJobs)
+	}
+	if metrics.Items["total_items"] != 2 || metrics.Items["running_items"] != 1 || metrics.Items["pending_items"] != 1 {
+		t.Fatalf("item metrics = %#v, want total=2 running=1 pending=1", metrics.Items)
+	}
+}
+
+func TestQueueManagerRejectsCancelTerminalJob(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, "", 1, []string{"done"})
+	if err := database.FinishJob(jobID, "completed"); err != nil {
+		t.Fatalf("FinishJob: %v", err)
+	}
+	queue := NewQueueManager(database, NewRunnerWithExecutor(database, executor.NewFakeExecutor()), QueueOptions{})
+
+	err := queue.CancelJob(jobID, "too late")
+	if err == nil || !strings.Contains(err.Error(), "terminal job cannot be canceled") {
+		t.Fatalf("CancelJob err = %v, want terminal guard", err)
+	}
+}
+
 func waitForJobStatus(t *testing.T, database *db.DB, jobID, status string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -197,4 +282,28 @@ func waitForJobStatus(t *testing.T, database *db.DB, jobID, status string, timeo
 		t.Fatalf("job not found")
 	}
 	t.Fatalf("job status = %s, want %s", job.Status, status)
+}
+
+func waitForFirstItemStatus(t *testing.T, database *db.DB, jobID, status string, timeout time.Duration) *db.BatchItem {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		items, err := database.ListItems(jobID)
+		if err != nil {
+			t.Fatalf("ListItems: %v", err)
+		}
+		for _, item := range items {
+			if item.Status == status {
+				return item
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	items, _ := database.ListItems(jobID)
+	statuses := make([]string, 0, len(items))
+	for _, item := range items {
+		statuses = append(statuses, item.Status)
+	}
+	t.Fatalf("no item status = %s within %s; statuses=%v", status, timeout, statuses)
+	return nil
 }
