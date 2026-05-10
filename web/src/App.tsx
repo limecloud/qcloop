@@ -232,6 +232,7 @@ export function App() {
     pending: items.filter((i) => i.status === 'pending').length,
     exhausted: items.filter((i) => i.status === 'exhausted').length,
   }
+  const terminalProblemCount = stats.failed + stats.exhausted
   const jobPageCount = Math.max(1, Math.ceil(jobs.length / JOB_PAGE_SIZE))
   const safeJobPage = Math.min(jobPage, jobPageCount)
   const jobPageStart = (safeJobPage - 1) * JOB_PAGE_SIZE
@@ -437,6 +438,17 @@ export function App() {
               <StatCard label="可重试" value={unfinishedCount} color="#1976d2" />
             </div>
 
+            {terminalProblemCount > 0 ? (
+              <div style={terminalWarningStyle}>
+                <strong>本批次未全部通过。</strong>
+                {' '}
+                当前有 {terminalProblemCount} 个失败或已耗尽项；
+                {currentJob.max_qc_rounds <= 1
+                  ? '最大质检轮次为 1，质检未通过时不会进入 repair。建议调到 3-5 轮后重试未成功项。'
+                  : '可以先查看展开明细里的 verifier feedback，再重试未成功项。'}
+              </div>
+            ) : null}
+
             <div style={tableContainerStyle}>
               {loading ? (
                 <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>
@@ -517,8 +529,8 @@ function JobStatusBadge({ status }: { status: string }) {
     pending: { bg: '#f5f5f5', color: '#666', label: '待运行' },
     running: { bg: '#e3f2fd', color: '#1976d2', label: '运行中' },
     paused: { bg: '#fff4e1', color: '#f57c00', label: '已暂停' },
-    completed: { bg: '#e1ffe1', color: '#2d7a2d', label: '已完成' },
-    failed: { bg: '#ffe1e1', color: '#d32f2f', label: '失败' },
+    completed: { bg: '#e1ffe1', color: '#2d7a2d', label: '全部通过' },
+    failed: { bg: '#ffe1e1', color: '#d32f2f', label: '未全部通过' },
   }
   const s = styles[status] || styles.pending
   return (
@@ -673,8 +685,8 @@ function JobRow({
       pending: '待处理',
       running: '运行中',
       paused: '已暂停',
-      completed: '已完成',
-      failed: '失败',
+      completed: '全部通过',
+      failed: '未全部通过',
     }
     return labels[status] || status
   }
@@ -685,7 +697,7 @@ function JobRow({
       running: { bg: '#e3f2fd', color: '#1976d2' },
       paused: { bg: '#fff4e1', color: '#f57c00' },
       completed: { bg: '#e1ffe1', color: '#2d7a2d' },
-      failed: { bg: '#ffe1e1', color: '#d32f2f' },
+      failed: { bg: '#ffe1e1', color: '#b91c1c' },
     }
     return colors[status] || colors.pending
   }
@@ -827,6 +839,18 @@ const statsStyle: React.CSSProperties = {
   borderRadius: '24px',
   boxShadow: '0 14px 36px rgba(15, 23, 42, 0.04)',
   marginBottom: '18px',
+}
+
+const terminalWarningStyle: React.CSSProperties = {
+  marginBottom: '18px',
+  padding: '14px 18px',
+  borderRadius: '18px',
+  border: '1px solid #fed7aa',
+  backgroundColor: '#fff7ed',
+  color: '#9a3412',
+  fontSize: '18px',
+  fontWeight: 600,
+  lineHeight: 1.55,
 }
 
 const tableContainerStyle: React.CSSProperties = {

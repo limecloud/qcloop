@@ -83,7 +83,7 @@ func (q *QueueManager) EnqueueJob(jobID, mode string) (string, error) {
 	if _, _, err := q.runner.PrepareRunMode(jobID, mode); err != nil {
 		return "", err
 	}
-	if completed, err := q.database.CompleteJobIfDone(jobID); err == nil && completed {
+	if done, _, err := q.database.FinishJobIfDone(jobID); err == nil && done {
 		q.runner.emitJobUpdate(jobID)
 		return "started", nil
 	}
@@ -171,10 +171,10 @@ func (q *QueueManager) processClaimedItem(workerID string, job *db.BatchJob, ite
 		return
 	}
 
-	completed, err := q.database.CompleteJobIfDone(job.ID)
+	done, _, err := q.database.FinishJobIfDone(job.ID)
 	if err != nil {
 		fmt.Printf("queue complete job failed: %v\n", err)
-	} else if completed {
+	} else if done {
 		q.runner.emitJobUpdate(job.ID)
 	}
 	q.signal()

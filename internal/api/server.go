@@ -404,6 +404,10 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 
 // listJobs 列出所有批次
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
+	if err := s.database.ReconcileAllDoneJobStatuses(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	query := `SELECT id, name, prompt_template, verifier_prompt_template, max_qc_rounds, token_budget_per_item, execution_mode, executor_provider, run_no, status, created_at, finished_at FROM batch_jobs ORDER BY created_at DESC`
 	rows, err := s.database.Conn().Query(query)
 	if err != nil {

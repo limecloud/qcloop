@@ -182,11 +182,12 @@ http://localhost:3000
 
 重点看：
 
-- 批次是否进入 `running` / `completed`
+- 批次是否进入 `running` / `completed` / `failed`；`completed` 表示全部 item 成功，`failed` 表示批次已结束但存在失败或耗尽项
 - 统计数字是否合理：成功、失败、进行中、待处理、已耗尽
 - 每个 item 的 `首次`、`质检1..N` 标签是否符合预期
 - 展开行后查看参数、stdout、stderr、verifier verdict、feedback
 - 如果批次已经完成，可以点击重新运行；qcloop 会保留历史，同时按本轮重新显示状态和标签
+- 如果需要自动返修，`max_qc_rounds` 不要设为 `1`；`1` 轮只会 worker + verifier，未通过会直接 `exhausted`
 
 ---
 
@@ -197,7 +198,7 @@ http://localhost:3000
 ```text
 人：打开 qcloop + 授权 Codex / Claude Code / Gemini CLI / Kiro CLI + 发一句最小提示词 + 打开 Web 面板监管
 AI agent：读取 llm-full.txt + 理解当前任务 + 设计 items + 创建/启动批次 + 轮询/总结结果
-qcloop：负责全局队列、断点恢复、状态机、worker/verifier/repair、证据留存
+qcloop：负责全局队列、断点恢复、状态机、worker/verifier/repair、证据留存；repair 会拿到上一轮 stdout/stderr/exit_code 和质检反馈,用于修复后复测
 ```
 
 ![qcloop async AI agent flow](images/qcloop-async-agent-flow.svg)

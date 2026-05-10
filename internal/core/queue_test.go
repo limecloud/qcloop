@@ -85,6 +85,35 @@ func TestQueueManagerProcessesItemsWithGlobalWorkers(t *testing.T) {
 	}
 }
 
+func TestQueueManagerMarksJobFailedWhenAnyItemFails(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, "", 1, []string{"bad"})
+	fake := executor.NewFakeExecutor(executor.FakeResponse{Stdout: "", Stderr: "test failed", ExitCode: 1})
+	runner := NewRunnerWithExecutor(database, fake)
+	queue := NewQueueManager(database, runner, QueueOptions{
+		WorkerCount:   1,
+		LeaseDuration: time.Second,
+		PollInterval:  5 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queue.Start(ctx)
+	defer queue.Stop()
+
+	if _, err := queue.EnqueueJob(jobID, RunModeAuto); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	waitForJobStatus(t, database, jobID, "failed", time.Second)
+
+	items, _ := database.ListItems(jobID)
+	if len(items) != 1 {
+		t.Fatalf("want 1 item, got %d", len(items))
+	}
+	if items[0].Status != "failed" {
+		t.Fatalf("item status = %s, want failed", items[0].Status)
+	}
+}
+
 func TestPrepareRunModeRetryUnfinishedKeepsSuccessAndQueuesOthers(t *testing.T) {
 	database := newTestDB(t)
 	jobID := makeJob(t, database, "", 1, []string{"ok", "bad", "spent"})

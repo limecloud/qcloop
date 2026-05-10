@@ -29,6 +29,9 @@ func (db *DB) CreateJob(job *BatchJob) error {
 
 // GetJob 获取批次
 func (db *DB) GetJob(id string) (*BatchJob, error) {
+	if _, _, err := db.ReconcileJobStatusIfDone(id); err != nil {
+		return nil, err
+	}
 	query := `SELECT ` + jobColumns + ` FROM batch_jobs WHERE id = ?`
 	job := &BatchJob{}
 	var createdAt, finishedAt sql.NullString
@@ -117,21 +120,116 @@ func (db *DB) FinishJob(id, status string) error {
 	return err
 }
 
-// CompleteJobIfDone 在 running job 没有 pending/running item 时标记 completed。
-func (db *DB) CompleteJobIfDone(jobID string) (bool, error) {
-	var remaining int
-	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM batch_items WHERE batch_job_id = ? AND status IN ('pending', 'running')`, jobID).Scan(&remaining); err != nil {
-		return false, err
-	}
-	if remaining > 0 {
-		return false, nil
-	}
-	res, err := db.conn.Exec(`UPDATE batch_jobs SET status = 'completed', finished_at = ? WHERE id = ? AND status = 'running'`, time.Now().Format(time.RFC3339), jobID)
+// FinishJobIfDone 在 running job 没有 pending/running item 时标记终态。
+//
+// 语义:
+//   - 全部 item 成功 => job.completed
+//   - 任一 item failed/exhausted => job.failed
+//
+// 这样 Web 面板的批次状态不会把“有失败项的跑完”误展示成“已完成/通过”。
+func (db *DB) FinishJobIfDone(jobID string) (bool, string, error) {
+	done, finalStatus, err := db.finalJobStatusIfDone(jobID)
 	if err != nil {
-		return false, err
+		return false, "", err
+	}
+	if !done {
+		return false, "", nil
+	}
+	res, err := db.conn.Exec(`UPDATE batch_jobs SET status = ?, finished_at = ? WHERE id = ? AND status = 'running'`, finalStatus, time.Now().Format(time.RFC3339), jobID)
+	if err != nil {
+		return false, "", err
 	}
 	changed, _ := res.RowsAffected()
-	return changed > 0, nil
+	return changed > 0, finalStatus, nil
+}
+
+// ReconcileJobStatusIfDone 修正历史或异步路径留下的终态漂移。
+//
+// 旧版本可能把包含 failed/exhausted item 的批次标成 completed;读取时
+// 主动收敛一次,避免 Web 面板把"跑完但未通过"误展示为"已完成"。
+func (db *DB) ReconcileJobStatusIfDone(jobID string) (bool, string, error) {
+	var currentStatus string
+	if err := db.conn.QueryRow(`SELECT status FROM batch_jobs WHERE id = ?`, jobID).Scan(&currentStatus); err != nil {
+		if err == sql.ErrNoRows {
+			return false, "", nil
+		}
+		return false, "", err
+	}
+	if currentStatus != "running" && currentStatus != "completed" && currentStatus != "failed" {
+		return false, currentStatus, nil
+	}
+	done, finalStatus, err := db.finalJobStatusIfDone(jobID)
+	if err != nil {
+		return false, "", err
+	}
+	if !done {
+		return false, currentStatus, nil
+	}
+	now := time.Now().Format(time.RFC3339)
+	res, err := db.conn.Exec(
+		`UPDATE batch_jobs SET status = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status IN ('running', 'completed', 'failed') AND (status <> ? OR finished_at IS NULL)`,
+		finalStatus,
+		now,
+		jobID,
+		finalStatus,
+	)
+	if err != nil {
+		return false, "", err
+	}
+	changed, _ := res.RowsAffected()
+	return changed > 0, finalStatus, nil
+}
+
+// ReconcileAllDoneJobStatuses 批量修正列表页会读到的历史终态漂移。
+func (db *DB) ReconcileAllDoneJobStatuses() error {
+	rows, err := db.conn.Query(`SELECT id FROM batch_jobs WHERE status IN ('running', 'completed', 'failed')`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, _, err := db.ReconcileJobStatusIfDone(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) finalJobStatusIfDone(jobID string) (bool, string, error) {
+	var remaining int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM batch_items WHERE batch_job_id = ? AND status IN ('pending', 'running')`, jobID).Scan(&remaining); err != nil {
+		return false, "", err
+	}
+	if remaining > 0 {
+		return false, "", nil
+	}
+	finalStatus := "completed"
+	var blocked int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM batch_items WHERE batch_job_id = ? AND status IN ('failed', 'exhausted')`, jobID).Scan(&blocked); err != nil {
+		return false, "", err
+	}
+	if blocked > 0 {
+		finalStatus = "failed"
+	}
+	return true, finalStatus, nil
+}
+
+// CompleteJobIfDone 保留旧调用签名;新代码优先使用 FinishJobIfDone。
+func (db *DB) CompleteJobIfDone(jobID string) (bool, error) {
+	changed, _, err := db.FinishJobIfDone(jobID)
+	return changed, err
 }
 
 // CreateItem 创建批次项

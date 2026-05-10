@@ -111,6 +111,10 @@ func TestRunBatch_NoVerifier_WorkerFails(t *testing.T) {
 	if items[0].Status != "failed" {
 		t.Errorf("want failed, got %s", items[0].Status)
 	}
+	job, _ := database.GetJob(jobID)
+	if job.Status != "failed" {
+		t.Errorf("job status: want failed when item failed, got %s", job.Status)
+	}
 }
 
 // 有 verifier 且首轮就 pass: 应该只跑 worker + 1 轮 verifier
@@ -199,6 +203,109 @@ func TestRunBatch_Verifier_Exhausted(t *testing.T) {
 	items, _ := database.ListItems(jobID)
 	if items[0].Status != "exhausted" {
 		t.Errorf("want exhausted after %d rounds, got %s", maxRounds, items[0].Status)
+	}
+	job, _ := database.GetJob(jobID)
+	if job.Status != "failed" {
+		t.Errorf("job status: want failed when item exhausted, got %s", job.Status)
+	}
+}
+
+func TestGetJobReconcilesCompletedJobWithExhaustedItems(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, "", 1, []string{"ok", "spent"})
+	items, _ := database.ListItems(jobID)
+	_ = database.FinishItem(items[0].ID, "success")
+	_ = database.FinishItem(items[1].ID, "exhausted")
+	_ = database.FinishJob(jobID, "completed")
+
+	job, err := database.GetJob(jobID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if job.Status != "failed" {
+		t.Fatalf("job status = %s, want failed", job.Status)
+	}
+	if job.FinishedAt == nil {
+		t.Fatal("reconciled terminal job should keep or set finished_at")
+	}
+}
+
+func TestRunBatch_VerifierReceivesAttemptEvidencePlaceholders(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, `item={{item}} stdout={{stdout}} output={{output}} stderr={{stderr}} code={{exit_code}} status={{attempt_status}} type={{attempt_type}}`, 2, []string{"case-1"})
+
+	fake := executor.NewFakeExecutor(
+		executor.FakeResponse{Stdout: "test stdout", Stderr: "test stderr", ExitCode: 7},
+		executor.FakeResponse{Stdout: `{"pass": true, "feedback": "ok"}`, ExitCode: 0},
+	)
+	runner := NewRunnerWithExecutor(database, fake)
+
+	if err := runner.RunBatch(context.Background(), jobID); err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+
+	calls := fake.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("want worker + verifier calls, got %d", len(calls))
+	}
+	verifierPrompt := calls[1].Prompt
+	for _, want := range []string{
+		"item=case-1",
+		"stdout=test stdout",
+		"output=test stdout",
+		"stderr=test stderr",
+		"code=7",
+		"status=failed",
+		"type=worker",
+	} {
+		if !strings.Contains(verifierPrompt, want) {
+			t.Fatalf("verifier prompt missing %q: %s", want, verifierPrompt)
+		}
+	}
+}
+
+func TestRunBatch_RepairPromptIncludesPreviousAttemptEvidence(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, `check {{item}}`, 2, []string{"repairable"})
+
+	fake := executor.NewFakeExecutor(
+		executor.FakeResponse{Stdout: "red test stdout", Stderr: "red test stderr", ExitCode: 3},
+		executor.FakeResponse{Stdout: `{"pass": false, "feedback": "需要修复断言失败"}`, ExitCode: 0},
+		executor.FakeResponse{Stdout: "green test stdout", ExitCode: 0},
+		executor.FakeResponse{Stdout: `{"pass": true, "feedback": "ok"}`, ExitCode: 0},
+	)
+	runner := NewRunnerWithExecutor(database, fake)
+
+	if err := runner.RunBatch(context.Background(), jobID); err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+
+	calls := fake.Calls()
+	if len(calls) != 4 {
+		t.Fatalf("want worker + verifier + repair + verifier calls, got %d", len(calls))
+	}
+	repairPrompt := calls[2].Prompt
+	for _, want := range []string{
+		"这是 qcloop 的 repair 轮次",
+		"red test stdout",
+		"red test stderr",
+		"退出码: 3",
+		"质检反馈：需要修复断言失败",
+		"重新运行与该测试项相关的最小验证命令",
+		"不要执行 git commit / git push / git reset",
+	} {
+		if !strings.Contains(repairPrompt, want) {
+			t.Fatalf("repair prompt missing %q: %s", want, repairPrompt)
+		}
+	}
+
+	items, _ := database.ListItems(jobID)
+	if items[0].Status != "success" {
+		t.Fatalf("item status = %s, want success after repair", items[0].Status)
+	}
+	job, _ := database.GetJob(jobID)
+	if job.Status != "completed" {
+		t.Fatalf("job status = %s, want completed after repaired item passed", job.Status)
 	}
 }
 

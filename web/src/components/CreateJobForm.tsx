@@ -121,6 +121,9 @@ export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
           max={10}
           style={{ ...inputStyle, width: '100px' }}
         />
+        <div style={helpTextStyle}>
+          1 轮只做质检不返修；需要 worker → verifier → repair 闭环时建议 3-5 轮。
+        </div>
       </div>
 
       <div style={fieldStyle}>

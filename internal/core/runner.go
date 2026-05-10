@@ -247,7 +247,7 @@ func (r *Runner) RunBatch(ctx context.Context, jobID string) error {
 		}
 	}
 
-	if err := r.database.FinishJob(jobID, "completed"); err != nil {
+	if _, _, err := r.database.FinishJobIfDone(jobID); err != nil {
 		return err
 	}
 	r.emitJobUpdate(jobID)
@@ -543,8 +543,7 @@ func (r *Runner) executeVerifier(ctx context.Context, exec executor.Executor, jo
 	lastAttempt := attempts[len(attempts)-1]
 
 	// 构造 verifier prompt
-	prompt := strings.ReplaceAll(job.VerifierPromptTemplate, "{{item}}", item.ItemValue)
-	prompt = strings.ReplaceAll(prompt, "{{output}}", lastAttempt.Stdout)
+	prompt := renderVerifierPrompt(job.VerifierPromptTemplate, item.ItemValue, lastAttempt)
 
 	qcRound := &db.QCRound{
 		ID:          db.GenerateID(),
@@ -601,10 +600,82 @@ func (r *Runner) executeVerifier(ctx context.Context, exec executor.Executor, jo
 
 // executeRepair 执行 repair
 func (r *Runner) executeRepair(ctx context.Context, exec executor.Executor, job *db.BatchJob, item *db.BatchItem, attemptNo int, feedback string) (*db.Attempt, error) {
-	prompt := strings.ReplaceAll(job.PromptTemplate, "{{item}}", item.ItemValue)
-	prompt = fmt.Sprintf("%s\n\n质检反馈：%s\n请根据反馈修复问题。", prompt, feedback)
+	attempts, err := r.listAttempts(item.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(attempts) == 0 {
+		return nil, fmt.Errorf("没有找到执行记录")
+	}
+	lastAttempt := attempts[len(attempts)-1]
+	prompt := buildRepairPrompt(job.PromptTemplate, item.ItemValue, lastAttempt, feedback)
 
 	return r.executeWorkerPrompt(ctx, exec, prompt, item, job.RunNo, attemptNo, "repair")
+}
+
+func renderVerifierPrompt(template, itemValue string, attempt *db.Attempt) string {
+	prompt := strings.ReplaceAll(template, "{{item}}", itemValue)
+	prompt = strings.ReplaceAll(prompt, "{{output}}", attempt.Stdout)
+	prompt = strings.ReplaceAll(prompt, "{{stdout}}", attempt.Stdout)
+	prompt = strings.ReplaceAll(prompt, "{{stderr}}", attempt.Stderr)
+	prompt = strings.ReplaceAll(prompt, "{{exit_code}}", formatExitCode(attempt.ExitCode))
+	prompt = strings.ReplaceAll(prompt, "{{attempt_status}}", attempt.Status)
+	prompt = strings.ReplaceAll(prompt, "{{attempt_type}}", attempt.AttemptType)
+	return prompt
+}
+
+func buildRepairPrompt(template, itemValue string, attempt *db.Attempt, feedback string) string {
+	basePrompt := strings.ReplaceAll(template, "{{item}}", itemValue)
+	return fmt.Sprintf(`%s
+
+---
+这是 qcloop 的 repair 轮次。上一轮测试或质检没有通过,请根据证据直接修复目标工作区中的问题。
+
+测试项:
+%s
+
+上一轮执行:
+- 类型: %s
+- 状态: %s
+- 退出码: %s
+
+上一轮 stdout:
+%s
+
+上一轮 stderr:
+%s
+
+质检反馈：%s
+
+修复要求:
+1. 先定位根因,再做最小必要修改;不要绕过测试或降低断言。
+2. 修复后重新运行与该测试项相关的最小验证命令。
+3. 最终输出修改文件、验证命令、验证结果和剩余风险。
+4. 除非人类明确授权,不要执行 git commit / git push / git reset。`,
+		basePrompt,
+		itemValue,
+		attempt.AttemptType,
+		attempt.Status,
+		formatExitCode(attempt.ExitCode),
+		clipForPrompt(attempt.Stdout),
+		clipForPrompt(attempt.Stderr),
+		feedback,
+	)
+}
+
+func formatExitCode(exitCode *int) string {
+	if exitCode == nil {
+		return "未知"
+	}
+	return fmt.Sprintf("%d", *exitCode)
+}
+
+func clipForPrompt(value string) string {
+	const maxPromptEvidenceBytes = 12000
+	if len(value) <= maxPromptEvidenceBytes {
+		return value
+	}
+	return value[:maxPromptEvidenceBytes] + "\n...[已截断,请按需重新运行相关命令获取完整日志]"
 }
 
 // 数据库操作辅助方法
