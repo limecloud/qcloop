@@ -162,8 +162,8 @@ mv ~/.qcloop/qcloop.db ~/.qcloop/qcloop.db.backup
 
 ## 常见问题
 
-### Q: codex exec 命令不存在
-A: 确保 codex CLI 已安装并在 PATH 中
+### Q: 执行器命令不存在
+A: 默认执行器是 codex，请确保 codex CLI 已安装并在 PATH 中；如果设置了 `QCLOOP_EXECUTOR_PROVIDER=claude_code|gemini_cli|kiro_cli`，请确认对应 CLI 可在同一启动环境中运行。
 
 ### Q: 数据库权限错误
 A: 检查 ~/.qcloop/ 目录权限

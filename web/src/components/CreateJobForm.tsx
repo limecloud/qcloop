@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../api'
-import type { BatchJob } from '../types'
+import type { BatchJob, ExecutorProvider } from '../types'
 
 interface Props {
   onCreated?: (job: BatchJob) => void
@@ -19,6 +19,9 @@ export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
   const [executionMode, setExecutionMode] = useState<'standard' | 'goal_assisted'>(
     initialJob?.execution_mode === 'goal_assisted' ? 'goal_assisted' : 'standard',
   )
+  const [executorProvider, setExecutorProvider] = useState<ExecutorProvider>(
+    initialJob?.executor_provider || 'codex',
+  )
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -35,6 +38,7 @@ export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
         max_qc_rounds: maxQCRounds,
         token_budget_per_item: tokenBudget || undefined,
         execution_mode: executionMode,
+        executor_provider: executorProvider,
       }
       if (editing && initialJob) {
         const job = await api.updateJob(initialJob.id, payload)
@@ -131,6 +135,23 @@ export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
       </div>
 
       <div style={fieldStyle}>
+        <label style={labelStyle}>执行器</label>
+        <select
+          value={executorProvider}
+          onChange={(e) => setExecutorProvider(e.target.value as ExecutorProvider)}
+          style={{ ...inputStyle, width: '260px' }}
+        >
+          <option value="codex">Codex CLI</option>
+          <option value="claude_code">Claude Code</option>
+          <option value="gemini_cli">Gemini CLI</option>
+          <option value="kiro_cli">Kiro CLI</option>
+        </select>
+        <div style={helpTextStyle}>
+          选择 qcloop 后台 worker/verifier 调用的本机 CLI；未安装或未登录会在执行记录里体现。
+        </div>
+      </div>
+
+      <div style={fieldStyle}>
         <label style={labelStyle}>执行模式</label>
         <select
           value={executionMode}
@@ -182,6 +203,13 @@ const inputStyle: React.CSSProperties = {
   borderRadius: '4px',
   fontSize: '14px',
   boxSizing: 'border-box',
+}
+
+const helpTextStyle: React.CSSProperties = {
+  marginTop: '6px',
+  color: '#64748b',
+  fontSize: '13px',
+  lineHeight: 1.45,
 }
 
 const buttonStyle: React.CSSProperties = {

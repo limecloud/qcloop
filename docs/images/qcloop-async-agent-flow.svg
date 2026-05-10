@@ -1,6 +1,6 @@
 <svg width="1280" height="760" viewBox="0 0 1280 760" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">qcloop AI Agent 异步使用架构</title>
-  <desc id="desc">人类用一句话驱动 AI agent，AI 读取 llm-full.txt 后自动理解上下文、拆分测试任务、创建批次并异步启动 Runner，Web 面板通过轮询监管进度。</desc>
+  <desc id="desc">人类用一句话驱动 AI agent，AI 读取 llm-full.txt 后自动理解上下文、拆分测试任务、选择执行器并创建批次，qcloop 通过 provider adapter 异步驱动 Codex / Claude Code / Gemini CLI / Kiro CLI。</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="760" gradientUnits="userSpaceOnUse">
       <stop stop-color="#F4FBF8"/>
@@ -47,7 +47,7 @@
   <circle cx="104" cy="666" r="190" fill="#FFFFFF" opacity="0.38"/>
 
   <text class="title" x="64" y="70">qcloop：一句话驱动的异步 AI QA Loop</text>
-  <text class="subtitle" x="64" y="104">人只说目标；AI 读取 llm-full.txt 后自动理解上下文、拆分 items、创建批次并异步启动，Web 面板只负责监管。</text>
+  <text class="subtitle" x="64" y="104">人只说目标；AI 读取 llm-full.txt 后自动理解上下文、拆分 items、选择 executor_provider 并异步启动，Web 面板只负责监管。</text>
 
   <rect x="58" y="136" width="318" height="366" rx="28" fill="url(#agent)" filter="url(#shadow)"/>
   <text class="section" x="86" y="178">1. 人 + 外层 AI Agent</text>
@@ -61,31 +61,31 @@
   <text class="box-text" x="110" y="365">理解当前任务 / 仓库上下文</text>
   <text class="box-text" x="110" y="391">拆分自动化测试 items</text>
   <text class="box-text" x="110" y="417">生成 worker / verifier prompt</text>
-  <text class="box-text" x="110" y="443">调用 qcloop HTTP API</text>
+  <text class="box-text" x="110" y="443">选择执行器并调 HTTP API</text>
 
   <rect x="430" y="136" width="318" height="366" rx="28" fill="url(#api)" filter="url(#shadow)"/>
   <text class="section" x="458" y="178">2. qcloop API 层</text>
   <rect x="458" y="204" width="262" height="90" rx="18" fill="#FFFFFF" opacity="0.94"/>
   <text class="box-title" x="482" y="235">创建批次</text>
   <text class="code" x="482" y="262">POST /api/jobs</text>
-  <text class="box-text" x="482" y="282">job.status = pending</text>
+  <text class="box-text" x="482" y="282">executor_provider + status=pending</text>
 
   <rect x="458" y="318" width="262" height="120" rx="18" fill="#FFFFFF" opacity="0.94"/>
   <text class="box-title" x="482" y="349">异步启动</text>
   <text class="code" x="482" y="376">POST /api/jobs/run</text>
-  <text class="box-text" x="482" y="402">创建后台 goroutine</text>
+  <text class="box-text" x="482" y="402">进入全局队列</text>
   <text class="box-text" x="482" y="426">立即返回 {status: started}</text>
 
   <rect x="812" y="136" width="408" height="366" rx="28" fill="url(#runner)" filter="url(#shadow)"/>
-  <text class="section" x="842" y="178">3. 后台 Runner 异步执行</text>
+  <text class="section" x="842" y="178">3. 全局 Worker Pool 异步执行</text>
   <rect x="842" y="204" width="348" height="72" rx="18" fill="#FFFFFF" opacity="0.94"/>
-  <text class="box-title" x="866" y="235">状态机 claim items</text>
-  <text class="box-text" x="866" y="260">pending → running → success / failed / exhausted</text>
+  <text class="box-title" x="866" y="235">Worker Pool lease claim</text>
+  <text class="box-text" x="866" y="260">pending → lease → running → terminal</text>
 
   <rect x="842" y="300" width="348" height="128" rx="18" fill="#FFFFFF" opacity="0.94"/>
-  <text class="box-title" x="866" y="331">Worker → Verifier → Repair</text>
-  <text class="box-text" x="866" y="359">Codex / Claude / Gemini 执行测试项</text>
-  <text class="box-text" x="866" y="385">独立 verifier 输出严格 JSON verdict</text>
+  <text class="box-title" x="866" y="331">Provider Adapter</text>
+  <text class="box-text" x="866" y="359">Codex / Claude Code / Gemini CLI / Kiro CLI</text>
+  <text class="box-text" x="866" y="385">Worker → Verifier → Repair 状态机</text>
   <text class="box-text" x="866" y="411">失败按 feedback 自动返修，最多 N 轮</text>
 
   <path d="M376 250H430" stroke="#17313B" stroke-width="3" marker-end="url(#arrow)"/>
@@ -93,7 +93,7 @@
   <path d="M748 378H812" stroke="#17313B" stroke-width="3" marker-end="url(#arrow)"/>
   <text class="tiny" x="758" y="360">启动后台</text>
   <path d="M812 422C782 462 735 466 700 438" stroke="#FFFFFF" stroke-width="3" stroke-dasharray="8 8" marker-end="url(#arrowLight)"/>
-  <text class="light-text" x="704" y="486">API 立即返回，不阻塞 AI / 页面</text>
+  <text class="light-text" x="704" y="486">API 立即返回，队列后台推进</text>
 
   <rect x="58" y="548" width="534" height="128" rx="26" fill="#FFFFFF" opacity="0.96" filter="url(#shadow)"/>
   <text class="box-title" x="88" y="588">Web 面板监管</text>
@@ -103,7 +103,7 @@
   <rect x="688" y="548" width="532" height="128" rx="26" fill="#FFFFFF" opacity="0.96" filter="url(#shadow)"/>
   <text class="box-title" x="718" y="588">证据存储</text>
   <text class="box-text" x="718" y="618">SQLite 持久化 batch_job、batch_item、attempt、qc_round</text>
-  <text class="box-text" x="718" y="648">stdout / stderr / verdict / feedback / token / 轮次可追溯</text>
+  <text class="box-text" x="718" y="648">stdout / stderr / verdict / feedback / token / run_no 可追溯</text>
 
   <path d="M1018 502V548" stroke="#17313B" stroke-width="3" marker-end="url(#arrow)"/>
   <text class="tiny" x="1032" y="532">落库</text>
@@ -113,5 +113,5 @@
   <text class="tiny" x="386" y="530">人只监管异常</text>
 
   <rect x="64" y="704" width="1156" height="34" rx="17" fill="#17313B" opacity="0.9"/>
-  <text class="light-text" x="92" y="726">关键点：/api/jobs/run 只负责触发后台 Runner 并立即返回；真正的测试循环在后端异步推进，AI 和 Web 通过 API 轮询观察状态。</text>
+  <text class="light-text" x="92" y="726">关键点：/api/jobs/run 只负责入队并立即返回；worker pool 后台 claim item，再经 provider adapter 调用本机 CLI 执行。</text>
 </svg>

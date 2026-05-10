@@ -3,7 +3,7 @@ import { CreateJobForm } from './components/CreateJobForm'
 import { BatchTable } from './components/BatchTable'
 import { useLiveItems } from './hooks/useLiveItems'
 import { api } from './api'
-import type { BatchJob, BatchItem } from './types'
+import type { BatchJob, BatchItem, RunMode } from './types'
 import { exportToJSON, exportToCSV, exportToMarkdown } from './utils/export'
 
 const JOB_ID_QUERY_KEY = 'job_id'
@@ -21,6 +21,19 @@ function writeJobIdToUrl(jobId: string | null) {
     url.searchParams.delete(JOB_ID_QUERY_KEY)
   }
   window.history.pushState({}, '', `${url.pathname}${url.search}${url.hash}`)
+}
+
+function runModeForCurrentJob(job: BatchJob, items: BatchItem[]): RunMode {
+  if (job.status !== 'completed' && job.status !== 'failed') {
+    return 'auto'
+  }
+  if (items.length === 0) {
+    return 'auto'
+  }
+  if (items.some((item) => item.status !== 'success')) {
+    return 'retry_unfinished'
+  }
+  return 'rerun_all'
 }
 
 export function App() {
@@ -151,11 +164,15 @@ export function App() {
   const handleRun = async () => {
     if (!currentJob) return
     setRunning(true)
+    const mode = runModeForCurrentJob(currentJob, items)
     try {
-      await api.runJob(currentJob.id)
-      setCurrentJob((prev) => prev ? { ...prev, status: 'running', finished_at: null } : prev)
+      await api.runJob(currentJob.id, mode)
+      const nextRunNo = mode === 'retry_unfinished' || mode === 'rerun_all'
+        ? currentJob.run_no + 1
+        : currentJob.run_no
+      setCurrentJob((prev) => prev ? { ...prev, status: 'running', run_no: nextRunNo, finished_at: null } : prev)
       setJobs((prev) => prev.map((job) => (
-        job.id === currentJob.id ? { ...job, status: 'running', finished_at: null } : job
+        job.id === currentJob.id ? { ...job, status: 'running', run_no: nextRunNo, finished_at: null } : job
       )))
     } catch (err) {
       console.error(err)
@@ -190,7 +207,10 @@ export function App() {
   const isTerminal = jobStatus === 'completed' || jobStatus === 'failed'
   const isActive = jobStatus === 'running' || (running && !isTerminal)
   const isPaused = jobStatus === 'paused'
-  const runButtonLabel = isTerminal ? '↻ 重新运行批次' : '▶ 运行批次'
+  const unfinishedCount = items.filter((item) => item.status !== 'success').length
+  const runButtonLabel = isTerminal
+    ? (unfinishedCount > 0 ? `↻ 重试未成功项 (${unfinishedCount})` : '↻ 重新运行全部')
+    : '▶ 运行批次'
 
   useEffect(() => {
     if (!currentJob) {
@@ -304,6 +324,7 @@ export function App() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                   <h2 style={{ margin: 0, fontSize: '26px', color: '#111827', fontWeight: 800, letterSpacing: '-0.02em' }}>{currentJob.name}</h2>
                   <JobStatusBadge status={currentJob.status} />
+                  <ProviderBadge provider={currentJob.executor_provider} />
                   <LiveModeBadge mode={mode} />
                 </div>
                 <p style={{ margin: '6px 0 0', fontSize: '18px', color: '#6b7280', fontWeight: 500 }}>
@@ -413,6 +434,7 @@ export function App() {
               <StatCard label="进行中" value={stats.running} color="#f57c00" />
               <StatCard label="待处理" value={stats.pending} color="#666" />
               <StatCard label="已耗尽" value={stats.exhausted} color="#f57c00" />
+              <StatCard label="可重试" value={unfinishedCount} color="#1976d2" />
             </div>
 
             <div style={tableContainerStyle}>
@@ -421,7 +443,7 @@ export function App() {
                   加载中...
                 </div>
               ) : (
-                <BatchTable items={items} maxQCRounds={currentJob.max_qc_rounds} />
+                <BatchTable items={items} maxQCRounds={currentJob.max_qc_rounds} runNo={currentJob.run_no} />
               )}
             </div>
           </>
@@ -451,6 +473,7 @@ export function App() {
                         <th style={thStyle}>批次名称</th>
                         <th style={thStyle}>批次 ID</th>
                         <th style={thStyle}>状态</th>
+                        <th style={thStyle}>执行器</th>
                         <th style={thStyle}>测试项</th>
                         <th style={thStyle}>质检轮次</th>
                         <th style={thStyle}>创建时间</th>
@@ -510,6 +533,32 @@ function JobStatusBadge({ status }: { status: string }) {
       }}
     >
       {s.label}
+    </span>
+  )
+}
+
+function ProviderBadge({ provider, compact = false }: { provider?: string; compact?: boolean }) {
+  const labels: Record<string, string> = {
+    codex: 'Codex',
+    claude_code: 'Claude Code',
+    gemini_cli: 'Gemini CLI',
+    kiro_cli: 'Kiro CLI',
+  }
+  const label = labels[provider || 'codex'] || provider || 'Codex'
+  return (
+    <span
+      title="本批次 worker / verifier / repair 使用的本机 CLI 执行器"
+      style={{
+        padding: compact ? '4px 10px' : '5px 14px',
+        borderRadius: '999px',
+        backgroundColor: '#eef6ff',
+        color: '#245c86',
+        fontSize: compact ? '16px' : '18px',
+        fontWeight: 800,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {label}
     </span>
   )
 }
@@ -623,6 +672,7 @@ function JobRow({
     const labels: Record<string, string> = {
       pending: '待处理',
       running: '运行中',
+      paused: '已暂停',
       completed: '已完成',
       failed: '失败',
     }
@@ -633,6 +683,7 @@ function JobRow({
     const colors: Record<string, { bg: string; color: string }> = {
       pending: { bg: '#fff4e1', color: '#f57c00' },
       running: { bg: '#e3f2fd', color: '#1976d2' },
+      paused: { bg: '#fff4e1', color: '#f57c00' },
       completed: { bg: '#e1ffe1', color: '#2d7a2d' },
       failed: { bg: '#ffe1e1', color: '#d32f2f' },
     }
@@ -664,6 +715,9 @@ function JobRow({
         >
           {getStatusLabel(job.status)}
         </span>
+      </td>
+      <td style={tdStyle}>
+        <ProviderBadge provider={job.executor_provider} compact />
       </td>
       <td style={tdStyle}>
         <span style={{ color: '#666' }}>{itemCount} 项</span>

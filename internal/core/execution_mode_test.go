@@ -88,3 +88,37 @@ func TestRunBatch_ExecutionMode_StandardDoesNotWrap(t *testing.T) {
 		t.Errorf("standard mode prompt should be literal render, got %q", got)
 	}
 }
+
+func TestRunnerSelectsJobExecutorProviderBeforeGoalWrapper(t *testing.T) {
+	fake := executor.NewFakeExecutor()
+	runner := &Runner{
+		executorFactory: func(provider string) (executor.Executor, error) {
+			if provider != executor.ProviderGeminiCLI {
+				t.Fatalf("provider = %q, want %q", provider, executor.ProviderGeminiCLI)
+			}
+			return fake, nil
+		},
+	}
+	job := &db.BatchJob{
+		PromptTemplate:         "do {{item}}",
+		VerifierPromptTemplate: "verify {{output}}",
+		ExecutionMode:          "goal_assisted",
+		ExecutorProvider:       executor.ProviderGeminiCLI,
+	}
+
+	active, err := runner.buildActiveExecutor(job)
+	if err != nil {
+		t.Fatalf("buildActiveExecutor: %v", err)
+	}
+	_, _, _, err = active.Execute(context.Background(), "raw task")
+	if err != nil {
+		t.Fatalf("active.Execute: %v", err)
+	}
+	calls := fake.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(calls))
+	}
+	if !strings.Contains(calls[0].Prompt, "GOAL:") || !strings.Contains(calls[0].Prompt, "raw task") {
+		t.Fatalf("goal wrapper prompt missing expected content: %s", calls[0].Prompt)
+	}
+}

@@ -7,7 +7,7 @@
 ### 前置条件
 1. Go 1.21+ 已安装
 2. Node.js 18+ 已安装（用于前端测试）
-3. codex CLI 已安装并可用
+3. 至少一个本机 AI CLI 执行器已安装并可用；默认测试使用 codex CLI
 4. SQLite 3 已安装
 
 ### 构建项目
@@ -230,6 +230,8 @@ curl -X POST http://localhost:8080/api/jobs \
     "prompt_template": "echo {{item}}",
     "verifier_prompt_template": "",
     "max_qc_rounds": 3,
+    "execution_mode": "standard",
+    "executor_provider": "codex",
     "items": ["api1", "api2"]
   }'
 ```
@@ -237,13 +239,14 @@ curl -X POST http://localhost:8080/api/jobs \
 **预期结果**：
 - 返回 200 状态码
 - 返回批次 JSON 对象
-- 包含 id, name, status 等字段
+- 包含 id, name, status, executor_provider 等字段
 
 **验证点**：
 - [ ] HTTP 200
 - [ ] 返回 JSON 格式
 - [ ] 包含批次 ID
 - [ ] status 为 pending
+- [ ] executor_provider 为 codex
 
 **保存批次 ID**：
 ```bash
@@ -274,18 +277,18 @@ curl http://localhost:8080/api/jobs/$API_BATCH_ID
 ```bash
 curl -X POST http://localhost:8080/api/jobs/run \
   -H "Content-Type: application/json" \
-  -d "{\"job_id\": \"$API_BATCH_ID\"}"
+  -d "{\"job_id\": \"$API_BATCH_ID\", \"mode\": \"auto\"}"
 ```
 
 **预期结果**：
 - 返回 200 状态码
 - 返回 {"status": "started"}
-- 批次在后台运行
+- 批次进入全局 worker pool 后台运行
 
 **验证点**：
 - [ ] HTTP 200
 - [ ] 返回 started 状态
-- [ ] 批次开始执行
+- [ ] 批次开始执行,未成功项重试时可使用 mode=retry_unfinished
 
 ### 3.5 测试获取批次项 API
 **目的**：验证 GET /api/items?job_id=
@@ -373,7 +376,7 @@ sleep 3
 
 2. 点击"创建批次"按钮
 
-3. 点击"运行批次"按钮
+3. 点击"运行批次"按钮；如果批次已结束且有失败/耗尽项，按钮会显示"重试未成功项"
 
 4. 观察实时更新
    - 统计卡片更新

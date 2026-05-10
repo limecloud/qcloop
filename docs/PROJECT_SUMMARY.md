@@ -36,8 +36,8 @@ qcloop 是一个**程序驱动的批量测试编排工具**，用于自动化执
 - [x] 状态管理（pending/running/success/failed/exhausted）
 
 #### 3. 执行器（Executor）
-- [x] Codex Executor 实现
-- [x] 子进程调用 `codex exec`
+- [x] Provider Adapter 实现
+- [x] 支持 `codex exec` / `claude -p` / `gemini -p` / `kiro-cli chat --no-interactive`
 - [x] stdout/stderr/exit_code 捕获
 - [x] 超时控制（5 分钟）
 - [x] 错误处理
@@ -243,7 +243,7 @@ worker -> verifier -> repair -> verifier -> ...
 
 2. ✅ Codex Executor 命令参数错误
    - 问题：使用了不存在的 `--prompt` 参数
-   - 修复：改为直接传递 prompt 作为参数
+   - 修复：改为直接传递 prompt 作为参数；后续已扩展为多 CLI provider
 
 3. ✅ 批次列表 API 未实现
    - 问题：前端调用返回空列表
@@ -302,12 +302,11 @@ worker -> verifier -> repair -> verifier -> ...
 1. ~~前端轮询未切 WebSocket~~ → useLiveItems WS+轮询兜底
 2. ~~token 预算是 schema-only~~ → Runner 真实扣减+熔断
 3. ~~暂停/恢复无 UI 入口~~ → 详情页三态按钮 + 状态徽章
+4. ~~并发执行与崩溃恢复缺失~~ → 全局 worker pool + SQLite lease + 15 分钟 stale 回收
 
 ### ⏳ 未开始
 - Codex `/goal` 集成:暂缓,等 /goal 从 experimental 转正
   (见 `GOAL_INTEGRATION.md` 顶部 "暂缓原因")
-- 并发执行(`concurrency > 1`):需先做 lease 机制
-- 崩溃恢复:lease 过期回收
 - 批次取消 / 批次模板
 - 分布式执行(长期)
 
@@ -318,16 +317,13 @@ worker -> verifier -> repair -> verifier -> ...
 ## 技术债务
 
 ### 已知问题(实事求是版)
-1. **前端轮询未切 WebSocket** — 后端已备好,只差前端改造
-2. **token 预算是 schema-only** — 字段存在但 Runner 逻辑未消费
-3. **暂停/恢复无 UI 入口** — 用户目前只能用 curl 触发
-4. **崩溃恢复不存在** — 进程中断后 in-flight item 会卡在 running
-4. 缺少测试项详情展开功能（信息展示待完善）
+1. 批次取消仍是后续项,当前主要提供暂停/恢复与未成功项重试。
+2. 分布式执行暂不做,当前全局 worker pool 只面向单进程 qcloop。
 
 ### 改进建议
-1. 使用 WebSocket 替代轮询，减少服务器压力
-2. 实现 token 预算控制，避免资源浪费
-3. 添加批次暂停/恢复功能，提高灵活性
+1. 增加可配置自动重试策略,例如 worker 非 0 自动重试 1 次。
+2. 增加批次取消与更细粒度的单 item 手动重试。
+3. 暴露更多队列指标,例如活跃 worker、租约剩余时间和平均等待时间。
 4. 实现测试项详情展开，方便查看完整信息
 
 ## 项目亮点

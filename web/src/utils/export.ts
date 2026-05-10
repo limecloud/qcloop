@@ -9,6 +9,8 @@ export function exportToJSON(job: BatchJob, items: BatchItem[]): void {
       prompt_template: job.prompt_template,
       verifier_prompt_template: job.verifier_prompt_template,
       max_qc_rounds: job.max_qc_rounds,
+      execution_mode: job.execution_mode,
+      executor_provider: job.executor_provider,
       status: job.status,
       created_at: job.created_at,
       finished_at: job.finished_at,
@@ -119,6 +121,8 @@ export function exportToMarkdown(job: BatchJob, items: BatchItem[]): void {
 - **批次名称**: ${job.name}
 - **批次 ID**: ${job.id}
 - **状态**: ${job.status}
+- **执行器**: ${job.executor_provider || 'codex'}
+- **执行模式**: ${job.execution_mode || 'standard'}
 - **创建时间**: ${job.created_at ? new Date(job.created_at).toLocaleString('zh-CN') : '-'}
 - **完成时间**: ${job.finished_at ? new Date(job.finished_at).toLocaleString('zh-CN') : '-'}
 - **最大质检轮次**: ${job.max_qc_rounds}

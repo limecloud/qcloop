@@ -1,12 +1,9 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -40,28 +37,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, prompt string) (stdout, std
 	if err != nil {
 		return "", "", -1, err
 	}
-	cmd := exec.CommandContext(ctx, codexPath, args...)
-
-	var outBuf, errBuf bytes.Buffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
-
-	err = cmd.Run()
-	stdout = outBuf.String()
-	stderr = errBuf.String()
-
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = -1
-			err = fmt.Errorf("执行失败: %w", err)
-		}
-	} else {
-		exitCode = 0
-	}
-
-	return
+	return runCLICommand(ctx, codexPath, args, "")
 }
 
 func codexExecArgsFromEnv(prompt string) ([]string, error) {
@@ -183,68 +159,18 @@ func splitCommandLine(input string) ([]string, error) {
 }
 
 func (e *CodexExecutor) resolveCodexPath(ctx context.Context) (string, error) {
-	if e.codexPath != "" {
-		if err := probeCodex(ctx, e.codexPath); err == nil {
-			return e.codexPath, nil
-		} else if os.Getenv("QCLOOP_CODEX_BIN") != "" {
-			return "", fmt.Errorf("QCLOOP_CODEX_BIN 不可用: %s: %w", e.codexPath, err)
-		}
+	path, probeError, err := resolveExecutablePath(ctx, executableProbeConfig{
+		DisplayName: "codex",
+		BinaryName:  "codex",
+		BinaryEnv:   "QCLOOP_CODEX_BIN",
+		CachedPath:  e.codexPath,
+		VersionArgs: []string{"--version"},
+	})
+	if err != nil {
+		e.probeError = probeError
+		return "", err
 	}
-
-	var probeErrors []string
-	for _, candidate := range codexCandidates() {
-		if err := probeCodex(ctx, candidate); err == nil {
-			e.codexPath = candidate
-			e.probeError = ""
-			return candidate, nil
-		} else {
-			probeErrors = append(probeErrors, fmt.Sprintf("%s: %v", candidate, err))
-		}
-	}
-
-	e.probeError = strings.Join(probeErrors, "; ")
-	return "", fmt.Errorf("没有找到可用 codex；请修复 PATH 或设置 QCLOOP_CODEX_BIN。探测结果: %s", e.probeError)
-}
-
-func codexCandidates() []string {
-	seen := map[string]bool{}
-	var candidates []string
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
-			continue
-		}
-		candidate := filepath.Join(dir, "codex")
-		if seen[candidate] || !isExecutable(candidate) {
-			continue
-		}
-		seen[candidate] = true
-		candidates = append(candidates, candidate)
-	}
-	return candidates
-}
-
-func isExecutable(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
-		return false
-	}
-	return info.Mode().Perm()&0111 != 0
-}
-
-func probeCodex(ctx context.Context, path string) error {
-	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(probeCtx, path, "--version")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		text := strings.TrimSpace(out.String())
-		if text == "" {
-			return err
-		}
-		return fmt.Errorf("%w: %s", err, text)
-	}
-	return nil
+	e.codexPath = path
+	e.probeError = ""
+	return path, nil
 }

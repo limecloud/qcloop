@@ -1,4 +1,4 @@
-import type { BatchJob, BatchItem, CreateJobRequest, UpdateJobRequest } from '../types'
+import type { BatchJob, BatchItem, CreateJobRequest, RunMode, UpdateJobRequest } from '../types'
 
 const API_BASE = '/api'
 
@@ -48,10 +48,10 @@ export const api = {
     }),
 
   // 运行批次
-  runJob: (jobId: string): Promise<{ status: string }> =>
+  runJob: (jobId: string, mode: RunMode = 'auto'): Promise<{ status: string }> =>
     request<{ status: string }>('/jobs/run', {
       method: 'POST',
-      body: JSON.stringify({ job_id: jobId }),
+      body: JSON.stringify({ job_id: jobId, mode }),
     }),
 
   // 暂停批次(取消当前在跑的 context)

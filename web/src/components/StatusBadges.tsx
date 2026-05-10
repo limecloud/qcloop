@@ -4,6 +4,7 @@ import { currentRunAttempts, currentRunQCRounds } from '../utils/currentRun'
 interface Props {
   item: BatchItem
   maxQCRounds?: number
+  runNo?: number
 }
 
 type BadgeTone = {
@@ -64,7 +65,7 @@ export function StageLabel({ status }: { status: string }) {
 // 队列标签组件
 export function QueueLabel({ status }: { status: string }) {
   const styles: Record<string, BadgeTone> = {
-    pending: { bg: '#eef2f7', color: '#64748b', label: '待启动' },
+    pending: { bg: '#eef2f7', color: '#64748b', label: '队列中' },
     running: { bg: '#fff1db', color: '#cf6b16', label: '执行中' },
     success: { bg: '#effce9', color: '#4f9f22', label: '已结束' },
     failed: { bg: '#ffe8e8', color: '#d32f2f', label: '已结束' },
@@ -95,9 +96,9 @@ export function QueueLabel({ status }: { status: string }) {
 }
 
 // 执行摘要组件（只展示当前运行态；历史明细放在展开区）
-export function ExecutionSummary({ item, maxQCRounds }: Props) {
-  const currentAttempts = currentRunAttempts(item, maxQCRounds)
-  const currentQCRounds = currentRunQCRounds(item, maxQCRounds)
+export function ExecutionSummary({ item, maxQCRounds, runNo }: Props) {
+  const currentAttempts = currentRunAttempts(item, runNo, maxQCRounds)
+  const currentQCRounds = currentRunQCRounds(item, runNo, maxQCRounds)
   const firstAttempt = currentAttempts[0] || null
   const latestAttempt = currentAttempts[currentAttempts.length - 1] || null
 
@@ -207,10 +208,10 @@ function ProcessChip({ label, tone }: { label: string; tone: string }) {
 }
 
 // 质检摘要组件
-export function QCSummary({ item, maxQCRounds }: Props) {
+export function QCSummary({ item, maxQCRounds, runNo }: Props) {
   const qcRounds = item.qc_rounds || []
-  const currentAttempts = currentRunAttempts(item, maxQCRounds)
-  const currentQCRounds = currentRunQCRounds(item, maxQCRounds)
+  const currentAttempts = currentRunAttempts(item, runNo, maxQCRounds)
+  const currentQCRounds = currentRunQCRounds(item, runNo, maxQCRounds)
   const latestAttempt = currentAttempts[currentAttempts.length - 1]
 
   if (currentQCRounds.length > 0) {

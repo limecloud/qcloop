@@ -12,11 +12,12 @@ import { currentRunAttempts, currentRunQCRounds } from '../utils/currentRun'
 interface Props {
   items: BatchItem[]
   maxQCRounds?: number
+  runNo?: number
 }
 
 const ITEM_PAGE_SIZE = 10
 
-export function BatchTable({ items, maxQCRounds }: Props) {
+export function BatchTable({ items, maxQCRounds, runNo }: Props) {
   const [page, setPage] = useState(1)
   const pageCount = Math.max(1, Math.ceil(items.length / ITEM_PAGE_SIZE))
   const safePage = Math.min(page, pageCount)
@@ -78,6 +79,7 @@ export function BatchTable({ items, maxQCRounds }: Props) {
                 item={item}
                 index={pageStart + index + 1}
                 maxQCRounds={maxQCRounds}
+                runNo={runNo}
               />
             ))}
           </tbody>
@@ -162,13 +164,15 @@ function ItemRow({
   item,
   index,
   maxQCRounds,
+  runNo,
 }: {
   item: BatchItem
   index: number
   maxQCRounds?: number
+  runNo?: number
 }) {
   const [expanded, setExpanded] = useState(false)
-  const currentAttempts = currentRunAttempts(item, maxQCRounds)
+  const currentAttempts = currentRunAttempts(item, runNo, maxQCRounds)
   const hasStarted = currentAttempts.length > 0
   const repairCount = currentAttempts.filter((a) => a.attempt_type === 'repair').length
 
@@ -194,15 +198,16 @@ function ItemRow({
         </td>
         <td style={tdStyle}>
           <QueueLabel status={item.status} />
+          {item.last_error && <div style={queueHintStyle}>{item.last_error}</div>}
         </td>
         <td style={tdStyle}>
           <FirstAttemptCell hasStarted={hasStarted} />
         </td>
         <td style={tdStyle}>
-          <QCSummary item={item} maxQCRounds={maxQCRounds} />
+          <QCSummary item={item} maxQCRounds={maxQCRounds} runNo={runNo} />
         </td>
         <td style={tdStyle}>
-          <ExecutionSummary item={item} maxQCRounds={maxQCRounds} />
+          <ExecutionSummary item={item} maxQCRounds={maxQCRounds} runNo={runNo} />
         </td>
         <td style={tdStyle}>
           <span style={changeCountStyle}>{repairCount}</span>
@@ -214,7 +219,7 @@ function ItemRow({
       {expanded && (
         <tr style={expandedRowStyle}>
           <td colSpan={9} style={{ padding: 0 }}>
-            <ItemDetails item={item} maxQCRounds={maxQCRounds} />
+            <ItemDetails item={item} maxQCRounds={maxQCRounds} runNo={runNo} />
           </td>
         </tr>
       )}
@@ -238,9 +243,9 @@ function ParamPreview({ value }: { value: string }) {
   )
 }
 
-function ItemDetails({ item, maxQCRounds }: { item: BatchItem; maxQCRounds?: number }) {
-  const attempts = currentRunAttempts(item, maxQCRounds)
-  const qcRounds = currentRunQCRounds(item, maxQCRounds)
+function ItemDetails({ item, maxQCRounds, runNo }: { item: BatchItem; maxQCRounds?: number; runNo?: number }) {
+  const attempts = currentRunAttempts(item, runNo, maxQCRounds)
+  const qcRounds = currentRunQCRounds(item, runNo, maxQCRounds)
   const allAttempts = item.attempts || []
   const allQCRounds = item.qc_rounds || []
 
@@ -323,7 +328,7 @@ function AttemptStderrBlock({ attempt }: { attempt: BatchItem['attempts'][number
   const failed = attempt.status === 'failed' || (attempt.exit_code !== null && attempt.exit_code !== 0)
   return (
     <OutputBlock
-      label={failed ? '错误输出' : 'Codex 运行日志（非错误）'}
+      label={failed ? '错误输出' : 'Agent 运行日志（非错误）'}
       tone={failed ? 'danger' : 'meta'}
       value={attempt.stderr}
     />
@@ -500,6 +505,14 @@ const emptyTextStyle: React.CSSProperties = {
   color: '#a8a29e',
   fontSize: '20px',
   fontWeight: 500,
+}
+
+const queueHintStyle: React.CSSProperties = {
+  marginTop: '6px',
+  color: '#9a6a16',
+  fontSize: '12px',
+  fontWeight: 700,
+  lineHeight: 1.35,
 }
 
 const changeCountStyle: React.CSSProperties = {

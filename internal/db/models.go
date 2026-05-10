@@ -8,6 +8,8 @@ import "time"
 //   - "standard":直接调 codex exec 执行原 prompt(默认)
 //   - "goal_assisted":把 prompt 包装成 goal-style(GOAL/TASK/STOP WHEN 段落)
 //     让 Codex 在单次 exec 内尽可能收敛,外层仍由 max_qc_rounds 硬停止
+//
+// ExecutorProvider 表示真正承接 worker/verifier/repair 的本机 CLI。
 type BatchJob struct {
 	ID                     string     `json:"id"`
 	Name                   string     `json:"name"`
@@ -16,6 +18,8 @@ type BatchJob struct {
 	MaxQCRounds            int        `json:"max_qc_rounds"`
 	TokenBudgetPerItem     int        `json:"token_budget_per_item"` // 每个 item 的 token 预算
 	ExecutionMode          string     `json:"execution_mode"`        // standard | goal_assisted
+	ExecutorProvider       string     `json:"executor_provider"`     // codex | claude_code | gemini_cli | kiro_cli
+	RunNo                  int        `json:"run_no"`                // 当前运行轮次,从 1 开始
 	Status                 string     `json:"status"`                // pending/running/completed/failed/paused
 	CreatedAt              time.Time  `json:"created_at"`
 	FinishedAt             *time.Time `json:"finished_at"`
@@ -31,6 +35,10 @@ type BatchItem struct {
 	CurrentQCNo      int        `json:"current_qc_no"`
 	TokensUsed       int        `json:"tokens_used"`       // 已使用的 token 数量
 	TimeUsedSeconds  int        `json:"time_used_seconds"` // 已使用的时间（秒）
+	LockOwner        string     `json:"lock_owner"`        // 当前队列 worker 租约持有者
+	LockExpiresAt    *time.Time `json:"lock_expires_at"`   // 租约过期时间
+	QueuedAt         *time.Time `json:"queued_at"`         // 最近一次入队时间
+	LastError        string     `json:"last_error"`        // 队列恢复/执行层面的最近错误
 	CreatedAt        time.Time  `json:"created_at"`
 	FinishedAt       *time.Time `json:"finished_at"`
 }
@@ -40,12 +48,13 @@ type Attempt struct {
 	ID          string     `json:"id"`
 	BatchItemID string     `json:"batch_item_id"`
 	AttemptNo   int        `json:"attempt_no"`
+	RunNo       int        `json:"run_no"`
 	AttemptType string     `json:"attempt_type"` // worker/repair
 	Status      string     `json:"status"`       // running/success/failed
 	Stdout      string     `json:"stdout"`
 	Stderr      string     `json:"stderr"`
 	ExitCode    *int       `json:"exit_code"`
-	TokensUsed  int        `json:"tokens_used"`  // 本次尝试使用的 token 数量
+	TokensUsed  int        `json:"tokens_used"` // 本次尝试使用的 token 数量
 	StartedAt   time.Time  `json:"started_at"`
 	FinishedAt  *time.Time `json:"finished_at"`
 }
@@ -55,6 +64,7 @@ type QCRound struct {
 	ID          string     `json:"id"`
 	BatchItemID string     `json:"batch_item_id"`
 	QCNo        int        `json:"qc_no"`
+	RunNo       int        `json:"run_no"`
 	Status      string     `json:"status"` // running/pass/fail
 	Verdict     string     `json:"verdict"`
 	Feedback    string     `json:"feedback"`
