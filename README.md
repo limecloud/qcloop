@@ -94,6 +94,12 @@ flowchart LR
 
 图里的关键差异是：脚本 prompt 把“检查”留在一次终端输出里；qcloop 把检查拆成可编排的状态机、独立 verifier、失败返修、证据存储和可视化监管。
 
+#### 一句话异步使用架构
+
+下面这张图对应推荐用法：人只发一句 `请读取 http://localhost:3000/llm-full.txt，然后使用 qcloop 帮我测试当前任务。`，外层 AI 自动理解上下文并提单；`/api/jobs/run` 只负责触发后端 Runner 并立即返回，真正的 worker / verifier / repair 循环在后台异步推进，Web 面板通过轮询监管。
+
+![qcloop async AI agent flow](docs/images/qcloop-async-agent-flow.svg)
+
 #### 产品界面预览
 
 下面是 Playwright 从本地 qcloop 面板截取的真实详情页：可以直接看到批次状态、统计数字、分页、每个 item 的状态机、质检轮次标签和参数入口。
@@ -320,6 +326,12 @@ npm run dev
 
 ## 🏗️ 架构设计
 
+### AI Agent 异步使用架构
+
+推荐主路径不是人手动创建批次，而是“人一句话 → AI 读取 `llm-full.txt` → 自动拆分测试任务 → qcloop 异步运行”。`POST /api/jobs/run` 会立即返回 `{status: started}`，后端 Runner 在 goroutine 中继续推进 item 状态机；AI 和 Web 面板都通过 API 轮询观察结果。
+
+![qcloop async AI agent flow](docs/images/qcloop-async-agent-flow.svg)
+
 ### 系统架构
 
 ```
@@ -464,7 +476,8 @@ qcloop/
 │   ├── TEST_CASES.md        # 测试用例（32 个测试点）
 │   ├── QUICK_TEST.md        # 快速测试指南
 │   ├── GOAL_INTEGRATION.md  # Codex Goal 集成方案
-│   └── PROJECT_SUMMARY.md   # 项目完成总结
+│   ├── PROJECT_SUMMARY.md   # 项目完成总结
+│   └── images/              # 文档图片（含异步使用架构图）
 ├── go.mod
 ├── go.sum
 ├── README.md
@@ -512,6 +525,7 @@ qcloop/
 ## 📖 文档
 
 - [AI Agent 一句话使用指南](docs/AI_AGENT_USAGE.md) - 打开 qcloop 后,让 Codex / Claude Code 读取 `http://localhost:3000/llm-full.txt`,自动理解上下文、拆分测试任务并自动提单
+- [AI Agent 异步使用架构图](docs/images/qcloop-async-agent-flow.svg) - 展示一句话驱动、自动提单、异步启动和 Web 轮询监管
 - [产品需求文档 (PRD)](docs/PRD.md) - 含设计哲学、用户故事、界面设计
 - [测试用例文档](docs/TEST_CASES.md) - 32 个详细测试用例
 - [快速测试指南](docs/QUICK_TEST.md) - 5 分钟快速测试

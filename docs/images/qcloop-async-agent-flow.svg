@@ -1,0 +1,117 @@
+<svg width="1280" height="760" viewBox="0 0 1280 760" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">qcloop AI Agent 异步使用架构</title>
+  <desc id="desc">人类用一句话驱动 AI agent，AI 读取 llm-full.txt 后自动理解上下文、拆分测试任务、创建批次并异步启动 Runner，Web 面板通过轮询监管进度。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F4FBF8"/>
+      <stop offset="0.52" stop-color="#F7F2E8"/>
+      <stop offset="1" stop-color="#EEF5FF"/>
+    </linearGradient>
+    <linearGradient id="agent" x1="70" y1="140" x2="360" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0E6E5B"/>
+      <stop offset="1" stop-color="#18A383"/>
+    </linearGradient>
+    <linearGradient id="api" x1="430" y1="140" x2="730" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#245C86"/>
+      <stop offset="1" stop-color="#3C89BD"/>
+    </linearGradient>
+    <linearGradient id="runner" x1="810" y1="140" x2="1180" y2="520" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8A5A17"/>
+      <stop offset="1" stop-color="#D18B22"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#15313B" flood-opacity="0.14"/>
+    </filter>
+    <marker id="arrow" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M2 2L12 7L2 12" stroke="#17313B" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrowLight" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M2 2L12 7L2 12" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .title { font: 800 34px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #17313B; }
+      .subtitle { font: 500 17px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #4A6370; }
+      .section { font: 800 21px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #FFFFFF; }
+      .box-title { font: 800 18px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #17313B; }
+      .box-text { font: 500 14px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #4A6370; }
+      .light-text { font: 600 14px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #FFFFFF; }
+      .tiny { font: 600 12px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #6D7E86; }
+      .pill { font: 800 13px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #17313B; }
+      .code { font: 700 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #17313B; }
+      .note { font: 700 15px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #17313B; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="760" rx="34" fill="url(#bg)"/>
+  <circle cx="1170" cy="96" r="150" fill="#FFFFFF" opacity="0.44"/>
+  <circle cx="104" cy="666" r="190" fill="#FFFFFF" opacity="0.38"/>
+
+  <text class="title" x="64" y="70">qcloop：一句话驱动的异步 AI QA Loop</text>
+  <text class="subtitle" x="64" y="104">人只说目标；AI 读取 llm-full.txt 后自动理解上下文、拆分 items、创建批次并异步启动，Web 面板只负责监管。</text>
+
+  <rect x="58" y="136" width="318" height="366" rx="28" fill="url(#agent)" filter="url(#shadow)"/>
+  <text class="section" x="86" y="178">1. 人 + 外层 AI Agent</text>
+  <rect x="86" y="204" width="262" height="78" rx="18" fill="#FFFFFF" opacity="0.94"/>
+  <text class="box-title" x="110" y="235">最小提示词</text>
+  <text class="code" x="110" y="260">读取 llm-full.txt</text>
+  <text class="code" x="110" y="279">用 qcloop 测当前任务</text>
+
+  <rect x="86" y="306" width="262" height="150" rx="18" fill="#FFFFFF" opacity="0.94"/>
+  <text class="box-title" x="110" y="337">AI 自动展开</text>
+  <text class="box-text" x="110" y="365">理解当前任务 / 仓库上下文</text>
+  <text class="box-text" x="110" y="391">拆分自动化测试 items</text>
+  <text class="box-text" x="110" y="417">生成 worker / verifier prompt</text>
+  <text class="box-text" x="110" y="443">调用 qcloop HTTP API</text>
+
+  <rect x="430" y="136" width="318" height="366" rx="28" fill="url(#api)" filter="url(#shadow)"/>
+  <text class="section" x="458" y="178">2. qcloop API 层</text>
+  <rect x="458" y="204" width="262" height="90" rx="18" fill="#FFFFFF" opacity="0.94"/>
+  <text class="box-title" x="482" y="235">创建批次</text>
+  <text class="code" x="482" y="262">POST /api/jobs</text>
+  <text class="box-text" x="482" y="282">job.status = pending</text>
+
+  <rect x="458" y="318" width="262" height="120" rx="18" fill="#FFFFFF" opacity="0.94"/>
+  <text class="box-title" x="482" y="349">异步启动</text>
+  <text class="code" x="482" y="376">POST /api/jobs/run</text>
+  <text class="box-text" x="482" y="402">创建后台 goroutine</text>
+  <text class="box-text" x="482" y="426">立即返回 {status: started}</text>
+
+  <rect x="812" y="136" width="408" height="366" rx="28" fill="url(#runner)" filter="url(#shadow)"/>
+  <text class="section" x="842" y="178">3. 后台 Runner 异步执行</text>
+  <rect x="842" y="204" width="348" height="72" rx="18" fill="#FFFFFF" opacity="0.94"/>
+  <text class="box-title" x="866" y="235">状态机 claim items</text>
+  <text class="box-text" x="866" y="260">pending → running → success / failed / exhausted</text>
+
+  <rect x="842" y="300" width="348" height="128" rx="18" fill="#FFFFFF" opacity="0.94"/>
+  <text class="box-title" x="866" y="331">Worker → Verifier → Repair</text>
+  <text class="box-text" x="866" y="359">Codex / Claude / Gemini 执行测试项</text>
+  <text class="box-text" x="866" y="385">独立 verifier 输出严格 JSON verdict</text>
+  <text class="box-text" x="866" y="411">失败按 feedback 自动返修，最多 N 轮</text>
+
+  <path d="M376 250H430" stroke="#17313B" stroke-width="3" marker-end="url(#arrow)"/>
+  <text class="tiny" x="386" y="234">读说明</text>
+  <path d="M748 378H812" stroke="#17313B" stroke-width="3" marker-end="url(#arrow)"/>
+  <text class="tiny" x="758" y="360">启动后台</text>
+  <path d="M812 422C782 462 735 466 700 438" stroke="#FFFFFF" stroke-width="3" stroke-dasharray="8 8" marker-end="url(#arrowLight)"/>
+  <text class="light-text" x="704" y="486">API 立即返回，不阻塞 AI / 页面</text>
+
+  <rect x="58" y="548" width="534" height="128" rx="26" fill="#FFFFFF" opacity="0.96" filter="url(#shadow)"/>
+  <text class="box-title" x="88" y="588">Web 面板监管</text>
+  <text class="box-text" x="88" y="618">人打开 http://localhost:3000 查看批次、统计、质检标签、参数和执行记录</text>
+  <text class="code" x="88" y="648">GET /api/jobs/:id  +  GET /api/items?job_id=...</text>
+
+  <rect x="688" y="548" width="532" height="128" rx="26" fill="#FFFFFF" opacity="0.96" filter="url(#shadow)"/>
+  <text class="box-title" x="718" y="588">证据存储</text>
+  <text class="box-text" x="718" y="618">SQLite 持久化 batch_job、batch_item、attempt、qc_round</text>
+  <text class="box-text" x="718" y="648">stdout / stderr / verdict / feedback / token / 轮次可追溯</text>
+
+  <path d="M1018 502V548" stroke="#17313B" stroke-width="3" marker-end="url(#arrow)"/>
+  <text class="tiny" x="1032" y="532">落库</text>
+  <path d="M688 612H592" stroke="#17313B" stroke-width="3" marker-end="url(#arrow)"/>
+  <text class="tiny" x="606" y="596">轮询读取</text>
+  <path d="M325 548C370 510 420 496 510 500" stroke="#17313B" stroke-width="3" stroke-dasharray="7 7" marker-end="url(#arrow)"/>
+  <text class="tiny" x="386" y="530">人只监管异常</text>
+
+  <rect x="64" y="704" width="1156" height="34" rx="17" fill="#17313B" opacity="0.9"/>
+  <text class="light-text" x="92" y="726">关键点：/api/jobs/run 只负责触发后台 Runner 并立即返回；真正的测试循环在后端异步推进，AI 和 Web 通过 API 轮询观察状态。</text>
+</svg>
