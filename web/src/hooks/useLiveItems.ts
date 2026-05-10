@@ -11,7 +11,7 @@ type Mode = 'ws' | 'polling' | 'idle'
  *   1. 挂载时先拉一次全量 items(保证初始视图立刻有数据,不等第一个 WS 事件)
  *   2. 开一个 WS 连接 /ws?job_id=xxx。收到 item_update / job_update 时重新拉全量
  *      (重新拉 API 比在前端合并增量简单可靠)
- *   3. WS 打不开 / 中途断开 → 自动切回 3s 轮询,并持续尝试重连 WS
+ *   3. 轮询始终作为兜底保留；WS 打不开 / 中途断开时继续轮询并尝试重连
  *   4. 组件卸载时,WS 与 polling 都清理
  *
  * mode 暴露给 UI,方便显示"WS 已连接"还是"轮询兜底"。
@@ -71,7 +71,6 @@ export function useLiveItems(jobId: string, pollIntervalMs = 3000) {
         ws.onopen = () => {
           if (cancelled) return
           setMode('ws')
-          stopPolling() // WS 就位,轮询退场
         }
 
         ws.onmessage = () => {
@@ -95,9 +94,12 @@ export function useLiveItems(jobId: string, pollIntervalMs = 3000) {
       }
     }
 
-    // 初始:先拉一次,再尝试 WS
+    // 初始:先拉一次,保留轮询兜底,再尝试 WS。
     refetch().then(() => {
-      if (!cancelled) connectWS()
+      if (!cancelled) {
+        startPolling()
+        connectWS()
+      }
     })
 
     return () => {

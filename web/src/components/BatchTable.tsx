@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { BatchItem } from '../types'
 import {
   StatusBadge,
@@ -7,12 +7,26 @@ import {
   ExecutionSummary,
   QCSummary,
 } from './StatusBadges'
+import { currentRunAttempts, currentRunQCRounds } from '../utils/currentRun'
 
 interface Props {
   items: BatchItem[]
+  maxQCRounds?: number
 }
 
-export function BatchTable({ items }: Props) {
+const ITEM_PAGE_SIZE = 10
+
+export function BatchTable({ items, maxQCRounds }: Props) {
+  const [page, setPage] = useState(1)
+  const pageCount = Math.max(1, Math.ceil(items.length / ITEM_PAGE_SIZE))
+  const safePage = Math.min(page, pageCount)
+  const pageStart = (safePage - 1) * ITEM_PAGE_SIZE
+  const pageItems = items.slice(pageStart, pageStart + ITEM_PAGE_SIZE)
+
+  useEffect(() => {
+    setPage((prev) => Math.min(prev, pageCount))
+  }, [pageCount])
+
   if (items.length === 0) {
     return (
       <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>
@@ -22,46 +36,140 @@ export function BatchTable({ items }: Props) {
   }
 
   return (
-    <div style={tableViewportStyle}>
-      <table style={tableStyle}>
-        <colgroup>
-          <col style={{ width: '120px' }} />
-          <col style={{ width: '160px' }} />
-          <col style={{ width: '210px' }} />
-          <col style={{ width: '160px' }} />
-          <col style={{ width: '120px' }} />
-          <col style={{ width: '280px' }} />
-          <col style={{ width: '360px' }} />
-          <col style={{ width: '110px' }} />
-          <col style={{ width: '260px' }} />
-        </colgroup>
-        <thead>
-          <tr style={headerRowStyle}>
-            <th style={thStyle}>序号</th>
-            <th style={thStyle}>状态</th>
-            <th style={thStyle}>阶段</th>
-            <th style={thStyle}>队列</th>
-            <th style={thStyle}>首次</th>
-            <th style={thStyle}>质检</th>
-            <th style={thStyle}>执行摘要</th>
-            <th style={thStyle}>变更</th>
-            <th style={thStyle}>参数</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((item, index) => (
-            <ItemRow key={item.id} item={item} index={index + 1} />
-          ))}
-        </tbody>
-      </table>
+    <>
+      <PaginationBar
+        page={safePage}
+        pageCount={pageCount}
+        total={items.length}
+        pageStart={pageStart}
+        pageSize={ITEM_PAGE_SIZE}
+        onPageChange={setPage}
+      />
+      <div style={tableViewportStyle}>
+        <table style={tableStyle}>
+          <colgroup>
+            <col style={{ width: '120px' }} />
+            <col style={{ width: '160px' }} />
+            <col style={{ width: '210px' }} />
+            <col style={{ width: '160px' }} />
+            <col style={{ width: '120px' }} />
+            <col style={{ width: '280px' }} />
+            <col style={{ width: '360px' }} />
+            <col style={{ width: '110px' }} />
+            <col style={{ width: '260px' }} />
+          </colgroup>
+          <thead>
+            <tr style={headerRowStyle}>
+              <th style={thStyle}>序号</th>
+              <th style={thStyle}>状态</th>
+              <th style={thStyle}>阶段</th>
+              <th style={thStyle}>队列</th>
+              <th style={thStyle}>首次</th>
+              <th style={thStyle}>质检</th>
+              <th style={thStyle}>执行摘要</th>
+              <th style={thStyle}>变更</th>
+              <th style={thStyle}>参数</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageItems.map((item, index) => (
+              <ItemRow
+                key={item.id}
+                item={item}
+                index={pageStart + index + 1}
+                maxQCRounds={maxQCRounds}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <PaginationBar
+        page={safePage}
+        pageCount={pageCount}
+        total={items.length}
+        pageStart={pageStart}
+        pageSize={ITEM_PAGE_SIZE}
+        onPageChange={setPage}
+      />
+    </>
+  )
+}
+
+function PaginationBar({
+  page,
+  pageCount,
+  total,
+  pageStart,
+  pageSize,
+  onPageChange,
+}: {
+  page: number
+  pageCount: number
+  total: number
+  pageStart: number
+  pageSize: number
+  onPageChange: (page: number) => void
+}) {
+  const from = total === 0 ? 0 : pageStart + 1
+  const to = Math.min(total, pageStart + pageSize)
+  return (
+    <div style={paginationBarStyle}>
+      <span style={paginationTextStyle}>
+        显示 {from}-{to} / 共 {total} 项
+      </span>
+      <div style={paginationActionsStyle}>
+        <button
+          type="button"
+          onClick={() => onPageChange(1)}
+          disabled={page <= 1}
+          style={paginationButtonStyle(page <= 1)}
+        >
+          首页
+        </button>
+        <button
+          type="button"
+          onClick={() => onPageChange(page - 1)}
+          disabled={page <= 1}
+          style={paginationButtonStyle(page <= 1)}
+        >
+          上一页
+        </button>
+        <span style={paginationPageStyle}>
+          第 {page} / {pageCount} 页
+        </span>
+        <button
+          type="button"
+          onClick={() => onPageChange(page + 1)}
+          disabled={page >= pageCount}
+          style={paginationButtonStyle(page >= pageCount)}
+        >
+          下一页
+        </button>
+        <button
+          type="button"
+          onClick={() => onPageChange(pageCount)}
+          disabled={page >= pageCount}
+          style={paginationButtonStyle(page >= pageCount)}
+        >
+          末页
+        </button>
+      </div>
     </div>
   )
 }
 
-function ItemRow({ item, index }: { item: BatchItem; index: number }) {
+function ItemRow({
+  item,
+  index,
+  maxQCRounds,
+}: {
+  item: BatchItem
+  index: number
+  maxQCRounds?: number
+}) {
   const [expanded, setExpanded] = useState(false)
-  const currentAttempts = currentRunAttempts(item)
-  const hasStarted = item.current_attempt_no > 0
+  const currentAttempts = currentRunAttempts(item, maxQCRounds)
+  const hasStarted = currentAttempts.length > 0
   const repairCount = currentAttempts.filter((a) => a.attempt_type === 'repair').length
 
   return (
@@ -91,10 +199,10 @@ function ItemRow({ item, index }: { item: BatchItem; index: number }) {
           <FirstAttemptCell hasStarted={hasStarted} />
         </td>
         <td style={tdStyle}>
-          <QCSummary item={item} />
+          <QCSummary item={item} maxQCRounds={maxQCRounds} />
         </td>
         <td style={tdStyle}>
-          <ExecutionSummary item={item} />
+          <ExecutionSummary item={item} maxQCRounds={maxQCRounds} />
         </td>
         <td style={tdStyle}>
           <span style={changeCountStyle}>{repairCount}</span>
@@ -106,7 +214,7 @@ function ItemRow({ item, index }: { item: BatchItem; index: number }) {
       {expanded && (
         <tr style={expandedRowStyle}>
           <td colSpan={9} style={{ padding: 0 }}>
-            <ItemDetails item={item} />
+            <ItemDetails item={item} maxQCRounds={maxQCRounds} />
           </td>
         </tr>
       )}
@@ -130,9 +238,9 @@ function ParamPreview({ value }: { value: string }) {
   )
 }
 
-function ItemDetails({ item }: { item: BatchItem }) {
-  const attempts = currentRunAttempts(item)
-  const qcRounds = currentRunQCRounds(item)
+function ItemDetails({ item, maxQCRounds }: { item: BatchItem; maxQCRounds?: number }) {
+  const attempts = currentRunAttempts(item, maxQCRounds)
+  const qcRounds = currentRunQCRounds(item, maxQCRounds)
   const allAttempts = item.attempts || []
   const allQCRounds = item.qc_rounds || []
 
@@ -207,18 +315,6 @@ function ItemDetails({ item }: { item: BatchItem }) {
   )
 }
 
-function currentRunAttempts(item: BatchItem) {
-  const count = Math.max(0, item.current_attempt_no || 0)
-  if (count === 0) return []
-  return (item.attempts || []).slice(-count)
-}
-
-function currentRunQCRounds(item: BatchItem) {
-  const count = Math.max(0, item.current_qc_no || 0)
-  if (count === 0) return []
-  return (item.qc_rounds || []).slice(-count)
-}
-
 function EmptyDetails({ label }: { label: string }) {
   return <div style={emptyDetailsStyle}>{label}</div>
 }
@@ -291,7 +387,49 @@ function formatParamTitle(value: string) {
 const tableViewportStyle: React.CSSProperties = {
   overflowX: 'auto',
   backgroundColor: '#fff',
-  borderRadius: '30px',
+}
+
+const paginationBarStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '16px',
+  padding: '16px 22px',
+  borderBottom: '1px solid #edf1f5',
+  backgroundColor: '#fff',
+}
+
+const paginationTextStyle: React.CSSProperties = {
+  color: '#64748b',
+  fontSize: '17px',
+  fontWeight: 700,
+}
+
+const paginationActionsStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
+  flexWrap: 'wrap',
+}
+
+const paginationPageStyle: React.CSSProperties = {
+  color: '#111827',
+  fontSize: '17px',
+  fontWeight: 800,
+  padding: '0 8px',
+}
+
+function paginationButtonStyle(disabled: boolean): React.CSSProperties {
+  return {
+    padding: '8px 14px',
+    backgroundColor: disabled ? '#f3f4f6' : '#fff',
+    color: disabled ? '#9ca3af' : '#374151',
+    border: '1px solid #d7dde7',
+    borderRadius: '999px',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    fontSize: '16px',
+    fontWeight: 800,
+  }
 }
 
 const tableStyle: React.CSSProperties = {

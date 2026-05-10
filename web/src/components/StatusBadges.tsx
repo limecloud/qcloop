@@ -1,7 +1,9 @@
 import type { BatchItem } from '../types'
+import { currentRunAttempts, currentRunQCRounds } from '../utils/currentRun'
 
 interface Props {
   item: BatchItem
+  maxQCRounds?: number
 }
 
 type BadgeTone = {
@@ -93,13 +95,13 @@ export function QueueLabel({ status }: { status: string }) {
 }
 
 // 执行摘要组件（只展示当前运行态；历史明细放在展开区）
-export function ExecutionSummary({ item }: Props) {
-  const currentAttempts = currentRunAttempts(item)
-  const currentQCRounds = currentRunQCRounds(item)
-  const currentAttempt = currentAttempts[currentAttempts.length - 1] || null
-  const qcChipCount = Math.max(item.current_qc_no || 0, currentQCRounds.length)
+export function ExecutionSummary({ item, maxQCRounds }: Props) {
+  const currentAttempts = currentRunAttempts(item, maxQCRounds)
+  const currentQCRounds = currentRunQCRounds(item, maxQCRounds)
+  const firstAttempt = currentAttempts[0] || null
+  const latestAttempt = currentAttempts[currentAttempts.length - 1] || null
 
-  if (item.status === 'pending' && item.current_attempt_no === 0 && item.current_qc_no === 0) {
+  if (item.status === 'pending' && currentAttempts.length === 0 && currentQCRounds.length === 0) {
     return (
       <div style={processListStyle}>
         <ProcessChip label="待启动" tone="pending" />
@@ -109,25 +111,22 @@ export function ExecutionSummary({ item }: Props) {
 
   return (
     <div style={processListStyle}>
-      {item.current_attempt_no > 0 ? (
-        <ProcessChip label="首次" tone={currentAttempt?.status || item.status} />
+      {currentAttempts.length > 0 ? (
+        <ProcessChip label="首次" tone={firstAttempt?.status || item.status} />
       ) : item.status === 'running' ? (
         <ProcessChip label="启动中" tone="running" />
       ) : (
         <ProcessChip label={terminalSummaryLabel(item.status)} tone={item.status} />
       )}
-      {qcChipCount > 0 ? (
-        Array.from({ length: qcChipCount }, (_, index) => {
-          const round = currentQCRounds[index]
-          return (
-            <ProcessChip
-              key={`qc-${index + 1}`}
-              label={`质检${index + 1}`}
-              tone={round?.status || item.status}
-            />
-          )
-        })
-      ) : item.status === 'running' ? (
+      {currentQCRounds.length > 0 ? (
+        currentQCRounds.map((round, index) => (
+          <ProcessChip
+            key={round.id || `qc-${index + 1}`}
+            label={`质检${index + 1}`}
+            tone={round.status || item.status}
+          />
+        ))
+      ) : item.status === 'running' && latestAttempt?.status === 'success' ? (
         <ProcessChip label="等待质检" tone="pending" />
       ) : null}
     </div>
@@ -208,21 +207,29 @@ function ProcessChip({ label, tone }: { label: string; tone: string }) {
 }
 
 // 质检摘要组件
-export function QCSummary({ item }: Props) {
+export function QCSummary({ item, maxQCRounds }: Props) {
   const qcRounds = item.qc_rounds || []
-  if (item.current_qc_no > 0) {
-    const currentQCRounds = currentRunQCRounds(item)
+  const currentAttempts = currentRunAttempts(item, maxQCRounds)
+  const currentQCRounds = currentRunQCRounds(item, maxQCRounds)
+  const latestAttempt = currentAttempts[currentAttempts.length - 1]
+
+  if (currentQCRounds.length > 0) {
     const currentQCRound = currentQCRounds[currentQCRounds.length - 1]
-    const roundCount = Math.max(item.current_qc_no || 0, currentQCRounds.length)
     return (
       <span style={qcTextStyle}>
-        {currentQCSummaryLabel(roundCount, currentQCRound?.status || item.status)}
+        {currentQCSummaryLabel(currentQCRounds.length, currentQCRound?.status || item.status)}
       </span>
     )
   }
 
   if (item.status === 'running') {
-    return <span style={qcTextStyle}>等待质检</span>
+    if (latestAttempt?.status === 'running') {
+      return <span style={qcTextStyle}>首次执行中</span>
+    }
+    if (latestAttempt?.status === 'success') {
+      return <span style={qcTextStyle}>等待质检</span>
+    }
+    return <span style={qcTextStyle}>启动中</span>
   }
   if (item.status === 'pending') {
     return <span style={mutedTextStyle}>未开始</span>
@@ -235,18 +242,6 @@ export function QCSummary({ item }: Props) {
     )
   }
   return <span style={qcTextStyle}>明细同步中</span>
-}
-
-function currentRunAttempts(item: BatchItem) {
-  const count = Math.max(0, item.current_attempt_no || 0)
-  if (count === 0) return []
-  return (item.attempts || []).slice(-count)
-}
-
-function currentRunQCRounds(item: BatchItem) {
-  const count = Math.max(0, item.current_qc_no || 0)
-  if (count === 0) return []
-  return (item.qc_rounds || []).slice(-count)
 }
 
 const qcTextStyle: React.CSSProperties = {

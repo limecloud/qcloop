@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { CreateJobForm } from './components/CreateJobForm'
 import { BatchTable } from './components/BatchTable'
 import { useLiveItems } from './hooks/useLiveItems'
@@ -7,6 +7,7 @@ import type { BatchJob, BatchItem } from './types'
 import { exportToJSON, exportToCSV, exportToMarkdown } from './utils/export'
 
 const JOB_ID_QUERY_KEY = 'job_id'
+const JOB_PAGE_SIZE = 10
 
 function readJobIdFromUrl() {
   return new URLSearchParams(window.location.search).get(JOB_ID_QUERY_KEY)
@@ -28,8 +29,19 @@ export function App() {
   const [urlJobId, setUrlJobId] = useState(() => readJobIdFromUrl())
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [editingJob, setEditingJob] = useState<BatchJob | null>(null)
+  const [jobPage, setJobPage] = useState(1)
   const [running, setRunning] = useState(false)
   const { items, loading, mode } = useLiveItems(currentJob?.id || '', 3000)
+
+  const applyJobSnapshot = useCallback((job: BatchJob) => {
+    setCurrentJob((prev) => (prev?.id === job.id ? job : prev))
+    setJobs((prev) => {
+      if (prev.some((item) => item.id === job.id)) {
+        return prev.map((item) => (item.id === job.id ? job : item))
+      }
+      return [job, ...prev]
+    })
+  }, [])
 
   useEffect(() => {
     const handlePopState = () => {
@@ -63,6 +75,34 @@ export function App() {
     const timer = setInterval(loadJobs, 5000)
     return () => clearInterval(timer)
   }, [urlJobId])
+
+  useEffect(() => {
+    if (!currentJob?.id) return
+    const jobId = currentJob.id
+    const shouldKeepPolling = currentJob.status === 'running' || currentJob.status === 'paused' || running
+    let cancelled = false
+
+    const refetchCurrentJob = async () => {
+      try {
+        const job = await api.getJob(jobId)
+        if (!cancelled) applyJobSnapshot(job)
+      } catch (err) {
+        console.error('同步当前批次状态失败:', err)
+      }
+    }
+
+    refetchCurrentJob()
+    if (!shouldKeepPolling) {
+      return () => {
+        cancelled = true
+      }
+    }
+    const timer = setInterval(refetchCurrentJob, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [currentJob?.id, currentJob?.status, running, applyJobSnapshot])
 
   const handleCreateJob = (job: BatchJob) => {
     setJobs([...jobs, job])
@@ -172,6 +212,14 @@ export function App() {
     pending: items.filter((i) => i.status === 'pending').length,
     exhausted: items.filter((i) => i.status === 'exhausted').length,
   }
+  const jobPageCount = Math.max(1, Math.ceil(jobs.length / JOB_PAGE_SIZE))
+  const safeJobPage = Math.min(jobPage, jobPageCount)
+  const jobPageStart = (safeJobPage - 1) * JOB_PAGE_SIZE
+  const pageJobs = jobs.slice(jobPageStart, jobPageStart + JOB_PAGE_SIZE)
+
+  useEffect(() => {
+    setJobPage((prev) => Math.min(prev, jobPageCount))
+  }, [jobPageCount])
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f6f7f9' }}>
@@ -373,7 +421,7 @@ export function App() {
                   加载中...
                 </div>
               ) : (
-                <BatchTable items={items} />
+                <BatchTable items={items} maxQCRounds={currentJob.max_qc_rounds} />
               )}
             </div>
           </>
@@ -388,31 +436,49 @@ export function App() {
                   暂无批次，点击右上角"新建批次"按钮创建
                 </div>
               ) : (
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr style={{ backgroundColor: '#f9f9f9', borderBottom: '1px solid #e0e0e0' }}>
-                      <th style={thStyle}>批次名称</th>
-                      <th style={thStyle}>批次 ID</th>
-                      <th style={thStyle}>状态</th>
-                      <th style={thStyle}>测试项</th>
-                      <th style={thStyle}>质检轮次</th>
-                      <th style={thStyle}>创建时间</th>
-                      <th style={thStyle}>完成时间</th>
-                      <th style={thStyle}>操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {jobs.map((job) => (
-                      <JobRow
-                        key={job.id}
-                        job={job}
-                        onSelect={selectJob}
-                        onEdit={setEditingJob}
-                        onDelete={handleDeleteJob}
-                      />
-                    ))}
-                  </tbody>
-                </table>
+                <>
+                  <JobPaginationBar
+                    page={safeJobPage}
+                    pageCount={jobPageCount}
+                    total={jobs.length}
+                    pageStart={jobPageStart}
+                    pageSize={JOB_PAGE_SIZE}
+                    onPageChange={setJobPage}
+                  />
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ backgroundColor: '#f9f9f9', borderBottom: '1px solid #e0e0e0' }}>
+                        <th style={thStyle}>批次名称</th>
+                        <th style={thStyle}>批次 ID</th>
+                        <th style={thStyle}>状态</th>
+                        <th style={thStyle}>测试项</th>
+                        <th style={thStyle}>质检轮次</th>
+                        <th style={thStyle}>创建时间</th>
+                        <th style={thStyle}>完成时间</th>
+                        <th style={thStyle}>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pageJobs.map((job) => (
+                        <JobRow
+                          key={job.id}
+                          job={job}
+                          onSelect={selectJob}
+                          onEdit={setEditingJob}
+                          onDelete={handleDeleteJob}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                  <JobPaginationBar
+                    page={safeJobPage}
+                    pageCount={jobPageCount}
+                    total={jobs.length}
+                    pageStart={jobPageStart}
+                    pageSize={JOB_PAGE_SIZE}
+                    onPageChange={setJobPage}
+                  />
+                </>
               )}
             </div>
           </div>
@@ -463,6 +529,69 @@ function StatCard({ label, value, color }: { label: string; value: number; color
       <div style={{ fontSize: '18px', color: '#7b8190', fontWeight: 700 }}>{label}</div>
       <div style={{ fontSize: '26px', fontWeight: 800, color, marginTop: '4px', letterSpacing: '-0.02em' }}>
         {value}
+      </div>
+    </div>
+  )
+}
+
+function JobPaginationBar({
+  page,
+  pageCount,
+  total,
+  pageStart,
+  pageSize,
+  onPageChange,
+}: {
+  page: number
+  pageCount: number
+  total: number
+  pageStart: number
+  pageSize: number
+  onPageChange: (page: number) => void
+}) {
+  const from = total === 0 ? 0 : pageStart + 1
+  const to = Math.min(total, pageStart + pageSize)
+  return (
+    <div style={jobPaginationBarStyle}>
+      <span style={jobPaginationTextStyle}>
+        显示 {from}-{to} / 共 {total} 个批次
+      </span>
+      <div style={jobPaginationActionsStyle}>
+        <button
+          type="button"
+          onClick={() => onPageChange(1)}
+          disabled={page <= 1}
+          style={jobPaginationButtonStyle(page <= 1)}
+        >
+          首页
+        </button>
+        <button
+          type="button"
+          onClick={() => onPageChange(page - 1)}
+          disabled={page <= 1}
+          style={jobPaginationButtonStyle(page <= 1)}
+        >
+          上一页
+        </button>
+        <span style={jobPaginationPageStyle}>
+          第 {page} / {pageCount} 页
+        </span>
+        <button
+          type="button"
+          onClick={() => onPageChange(page + 1)}
+          disabled={page >= pageCount}
+          style={jobPaginationButtonStyle(page >= pageCount)}
+        >
+          下一页
+        </button>
+        <button
+          type="button"
+          onClick={() => onPageChange(pageCount)}
+          disabled={page >= pageCount}
+          style={jobPaginationButtonStyle(page >= pageCount)}
+        >
+          末页
+        </button>
       </div>
     </div>
   )
@@ -689,6 +818,47 @@ const tdStyle: React.CSSProperties = {
   padding: '16px',
   verticalAlign: 'middle',
   fontSize: '18px',
+}
+
+const jobPaginationBarStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '16px',
+  padding: '14px 0 18px',
+}
+
+const jobPaginationTextStyle: React.CSSProperties = {
+  color: '#64748b',
+  fontSize: '17px',
+  fontWeight: 700,
+}
+
+const jobPaginationActionsStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
+  flexWrap: 'wrap',
+}
+
+const jobPaginationPageStyle: React.CSSProperties = {
+  color: '#111827',
+  fontSize: '17px',
+  fontWeight: 800,
+  padding: '0 8px',
+}
+
+function jobPaginationButtonStyle(disabled: boolean): React.CSSProperties {
+  return {
+    padding: '8px 14px',
+    backgroundColor: disabled ? '#f3f4f6' : '#fff',
+    color: disabled ? '#9ca3af' : '#374151',
+    border: '1px solid #d7dde7',
+    borderRadius: '999px',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    fontSize: '16px',
+    fontWeight: 800,
+  }
 }
 
 function ExportMenu({ job, items }: { job: BatchJob; items: BatchItem[] }) {
