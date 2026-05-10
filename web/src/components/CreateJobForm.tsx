@@ -13,7 +13,7 @@ export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
   const [name, setName] = useState(initialJob?.name || '')
   const [promptTemplate, setPromptTemplate] = useState(initialJob?.prompt_template || '')
   const [verifierPrompt, setVerifierPrompt] = useState(initialJob?.verifier_prompt_template || '')
-  const [items, setItems] = useState('')
+  const [itemsText, setItemsText] = useState('')
   const [maxQCRounds, setMaxQCRounds] = useState(initialJob?.max_qc_rounds || 3)
   const [tokenBudget, setTokenBudget] = useState(initialJob?.token_budget_per_item || 0)
   const [executionMode, setExecutionMode] = useState<'standard' | 'goal_assisted'>(
@@ -44,10 +44,9 @@ export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
         const job = await api.updateJob(initialJob.id, payload)
         onUpdated?.(job)
       } else {
-        const itemList = items.split(',').map((s) => s.trim()).filter(Boolean)
         const job = await api.createJob({
           ...payload,
-          items: itemList,
+          items_text: itemsText,
         })
         onCreated?.(job)
       }
@@ -99,15 +98,18 @@ export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
 
       {!editing && (
         <div style={fieldStyle}>
-          <label style={labelStyle}>测试项列表（逗号分隔）*</label>
-          <input
-            type="text"
-            value={items}
-            onChange={(e) => setItems(e.target.value)}
+          <label style={labelStyle}>测试项列表（每行一个，支持 JSONL）*</label>
+          <textarea
+            value={itemsText}
+            onChange={(e) => setItemsText(e.target.value)}
             required
-            style={inputStyle}
-            placeholder="item1,item2,item3"
+            rows={6}
+            style={{ ...inputStyle, fontFamily: 'monospace' }}
+            placeholder={'docs/a.md\n{"name":"review docs/b.md","target":"docs/b.md","risk":"允许修改文档，不提交"}'}
           />
+          <div style={helpTextStyle}>
+            已解析 {countItemsText(itemsText)} 项。日常推荐由外层 AI 通过 Skill 或 llm.txt 自动生成。
+          </div>
         </div>
       )}
 
@@ -177,6 +179,10 @@ export function CreateJobForm({ onCreated, onUpdated, initialJob }: Props) {
       </button>
     </form>
   )
+}
+
+function countItemsText(value: string) {
+  return value.split('\n').map((line) => line.trim()).filter(Boolean).length
 }
 
 const formStyle: React.CSSProperties = {

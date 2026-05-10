@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS batch_items (
     lock_expires_at TEXT,
     queued_at TEXT,
     last_error TEXT,
+    confirmation_question TEXT,
+    confirmation_answer TEXT,
     created_at TEXT NOT NULL,
     finished_at TEXT,
     FOREIGN KEY (batch_job_id) REFERENCES batch_jobs(id) ON DELETE CASCADE
@@ -89,6 +91,8 @@ var MigrationStatements = []string{
 	`ALTER TABLE batch_items ADD COLUMN lock_expires_at TEXT`,
 	`ALTER TABLE batch_items ADD COLUMN queued_at TEXT`,
 	`ALTER TABLE batch_items ADD COLUMN last_error TEXT`,
+	`ALTER TABLE batch_items ADD COLUMN confirmation_question TEXT`,
+	`ALTER TABLE batch_items ADD COLUMN confirmation_answer TEXT`,
 	`ALTER TABLE attempts ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE attempts ADD COLUMN run_no INTEGER NOT NULL DEFAULT 1`,
 	`ALTER TABLE qc_rounds ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0`,

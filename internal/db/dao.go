@@ -9,7 +9,7 @@ import (
 )
 
 const jobColumns = `id, name, prompt_template, verifier_prompt_template, max_qc_rounds, token_budget_per_item, execution_mode, executor_provider, run_no, status, created_at, finished_at`
-const itemColumns = `id, batch_job_id, item_value, status, current_attempt_no, current_qc_no, tokens_used, lock_owner, lock_expires_at, queued_at, last_error, created_at, finished_at`
+const itemColumns = `id, batch_job_id, item_value, status, current_attempt_no, current_qc_no, tokens_used, lock_owner, lock_expires_at, queued_at, last_error, confirmation_question, confirmation_answer, created_at, finished_at`
 
 // CreateJob 创建批次
 func (db *DB) CreateJob(job *BatchJob) error {
@@ -135,7 +135,14 @@ func (db *DB) FinishJobIfDone(jobID string) (bool, string, error) {
 	if !done {
 		return false, "", nil
 	}
-	res, err := db.conn.Exec(`UPDATE batch_jobs SET status = ?, finished_at = ? WHERE id = ? AND status = 'running'`, finalStatus, time.Now().Format(time.RFC3339), jobID)
+	now := time.Now().Format(time.RFC3339)
+	res, err := db.conn.Exec(
+		`UPDATE batch_jobs SET status = ?, finished_at = CASE WHEN ? = 'waiting_confirmation' THEN NULL ELSE ? END WHERE id = ? AND status = 'running'`,
+		finalStatus,
+		finalStatus,
+		now,
+		jobID,
+	)
 	if err != nil {
 		return false, "", err
 	}
@@ -155,7 +162,7 @@ func (db *DB) ReconcileJobStatusIfDone(jobID string) (bool, string, error) {
 		}
 		return false, "", err
 	}
-	if currentStatus != "running" && currentStatus != "completed" && currentStatus != "failed" {
+	if currentStatus != "running" && currentStatus != "waiting_confirmation" && currentStatus != "completed" && currentStatus != "failed" {
 		return false, currentStatus, nil
 	}
 	done, finalStatus, err := db.finalJobStatusIfDone(jobID)
@@ -167,7 +174,8 @@ func (db *DB) ReconcileJobStatusIfDone(jobID string) (bool, string, error) {
 	}
 	now := time.Now().Format(time.RFC3339)
 	res, err := db.conn.Exec(
-		`UPDATE batch_jobs SET status = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status IN ('running', 'completed', 'failed') AND (status <> ? OR finished_at IS NULL)`,
+		`UPDATE batch_jobs SET status = ?, finished_at = CASE WHEN ? = 'waiting_confirmation' THEN NULL ELSE COALESCE(finished_at, ?) END WHERE id = ? AND status IN ('running', 'waiting_confirmation', 'completed', 'failed') AND (status <> ? OR finished_at IS NULL)`,
+		finalStatus,
 		finalStatus,
 		now,
 		jobID,
@@ -182,7 +190,7 @@ func (db *DB) ReconcileJobStatusIfDone(jobID string) (bool, string, error) {
 
 // ReconcileAllDoneJobStatuses 批量修正列表页会读到的历史终态漂移。
 func (db *DB) ReconcileAllDoneJobStatuses() error {
-	rows, err := db.conn.Query(`SELECT id FROM batch_jobs WHERE status IN ('running', 'completed', 'failed')`)
+	rows, err := db.conn.Query(`SELECT id FROM batch_jobs WHERE status IN ('running', 'waiting_confirmation', 'completed', 'failed')`)
 	if err != nil {
 		return err
 	}
@@ -214,6 +222,13 @@ func (db *DB) finalJobStatusIfDone(jobID string) (bool, string, error) {
 	}
 	if remaining > 0 {
 		return false, "", nil
+	}
+	var awaiting int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM batch_items WHERE batch_job_id = ? AND status = 'awaiting_confirmation'`, jobID).Scan(&awaiting); err != nil {
+		return false, "", err
+	}
+	if awaiting > 0 {
+		return true, "waiting_confirmation", nil
 	}
 	finalStatus := "completed"
 	var blocked int
@@ -282,8 +297,8 @@ type rowScanner interface {
 }
 
 func scanItem(row rowScanner, item *BatchItem) error {
-	var lockOwner, lockExpiresAt, queuedAt, lastError, createdAt, finishedAt sql.NullString
-	if err := row.Scan(&item.ID, &item.BatchJobID, &item.ItemValue, &item.Status, &item.CurrentAttemptNo, &item.CurrentQCNo, &item.TokensUsed, &lockOwner, &lockExpiresAt, &queuedAt, &lastError, &createdAt, &finishedAt); err != nil {
+	var lockOwner, lockExpiresAt, queuedAt, lastError, confirmationQuestion, confirmationAnswer, createdAt, finishedAt sql.NullString
+	if err := row.Scan(&item.ID, &item.BatchJobID, &item.ItemValue, &item.Status, &item.CurrentAttemptNo, &item.CurrentQCNo, &item.TokensUsed, &lockOwner, &lockExpiresAt, &queuedAt, &lastError, &confirmationQuestion, &confirmationAnswer, &createdAt, &finishedAt); err != nil {
 		return err
 	}
 	if lockOwner.Valid {
@@ -297,6 +312,12 @@ func scanItem(row rowScanner, item *BatchItem) error {
 	}
 	if lastError.Valid {
 		item.LastError = lastError.String
+	}
+	if confirmationQuestion.Valid {
+		item.ConfirmationQuestion = confirmationQuestion.String
+	}
+	if confirmationAnswer.Valid {
+		item.ConfirmationAnswer = confirmationAnswer.String
 	}
 	if t := parseNullableTime(createdAt); t != nil {
 		item.CreatedAt = *t
@@ -338,13 +359,13 @@ func (db *DB) ResetItemsForRerun(jobID string) error {
 func (db *DB) ResetItemsForRerunMode(jobID, scope string) error {
 	now := time.Now().Format(time.RFC3339)
 	if scope == "unfinished" {
-		if _, err := db.conn.Exec(`UPDATE batch_items SET current_attempt_no = 0, current_qc_no = 0, tokens_used = 0, lock_owner = NULL, lock_expires_at = NULL, queued_at = NULL, last_error = NULL WHERE batch_job_id = ? AND status = 'success'`, jobID); err != nil {
+		if _, err := db.conn.Exec(`UPDATE batch_items SET current_attempt_no = 0, current_qc_no = 0, tokens_used = 0, lock_owner = NULL, lock_expires_at = NULL, queued_at = NULL, last_error = NULL, confirmation_question = NULL, confirmation_answer = NULL WHERE batch_job_id = ? AND status = 'success'`, jobID); err != nil {
 			return err
 		}
-		_, err := db.conn.Exec(`UPDATE batch_items SET status = 'pending', current_attempt_no = 0, current_qc_no = 0, tokens_used = 0, finished_at = NULL, lock_owner = NULL, lock_expires_at = NULL, queued_at = ?, last_error = NULL WHERE batch_job_id = ? AND status <> 'success'`, now, jobID)
+		_, err := db.conn.Exec(`UPDATE batch_items SET status = 'pending', current_attempt_no = 0, current_qc_no = 0, tokens_used = 0, finished_at = NULL, lock_owner = NULL, lock_expires_at = NULL, queued_at = ?, last_error = NULL, confirmation_question = NULL, confirmation_answer = NULL WHERE batch_job_id = ? AND status <> 'success'`, now, jobID)
 		return err
 	}
-	_, err := db.conn.Exec(`UPDATE batch_items SET status = 'pending', current_attempt_no = 0, current_qc_no = 0, tokens_used = 0, finished_at = NULL, lock_owner = NULL, lock_expires_at = NULL, queued_at = ?, last_error = NULL WHERE batch_job_id = ?`, now, jobID)
+	_, err := db.conn.Exec(`UPDATE batch_items SET status = 'pending', current_attempt_no = 0, current_qc_no = 0, tokens_used = 0, finished_at = NULL, lock_owner = NULL, lock_expires_at = NULL, queued_at = ?, last_error = NULL, confirmation_question = NULL, confirmation_answer = NULL WHERE batch_job_id = ?`, now, jobID)
 	return err
 }
 
@@ -360,6 +381,33 @@ func (db *DB) FinishItem(id, status string) error {
 	now := time.Now()
 	query := `UPDATE batch_items SET status = ?, finished_at = ?, lock_owner = NULL, lock_expires_at = NULL, last_error = NULL WHERE id = ?`
 	_, err := db.conn.Exec(query, status, now.Format(time.RFC3339), id)
+	return err
+}
+
+// MarkItemAwaitingConfirmation 暂停单个 item,等待外层 AI 获取人类确认后继续。
+func (db *DB) MarkItemAwaitingConfirmation(id, question string) error {
+	question = fmt.Sprintf("%s", question)
+	_, err := db.conn.Exec(
+		`UPDATE batch_items SET status = 'awaiting_confirmation', finished_at = NULL, lock_owner = NULL, lock_expires_at = NULL, last_error = ?, confirmation_question = ?, confirmation_answer = NULL WHERE id = ?`,
+		question,
+		question,
+		id,
+	)
+	return err
+}
+
+// AnswerItemConfirmation 保存外层 AI 写回的人类确认;resume=true 时重新入队。
+func (db *DB) AnswerItemConfirmation(id, answer string, resume bool) error {
+	if resume {
+		_, err := db.conn.Exec(
+			`UPDATE batch_items SET status = 'pending', finished_at = NULL, lock_owner = NULL, lock_expires_at = NULL, queued_at = ?, last_error = NULL, confirmation_answer = ? WHERE id = ?`,
+			time.Now().Format(time.RFC3339),
+			answer,
+			id,
+		)
+		return err
+	}
+	_, err := db.conn.Exec(`UPDATE batch_items SET confirmation_answer = ? WHERE id = ?`, answer, id)
 	return err
 }
 

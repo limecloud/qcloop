@@ -259,6 +259,24 @@ function ItemDetails({ item, maxQCRounds, runNo }: { item: BatchItem; maxQCRound
         <pre style={paramDetailsBlockStyle}>{formatParamPreview(item.item_value)}</pre>
       </section>
 
+      {item.status === 'awaiting_confirmation' || item.confirmation_question || item.confirmation_answer ? (
+        <section style={confirmationDetailsStyle}>
+          <h4 style={{ ...detailsHeadingStyle, marginTop: 0 }}>AI 待确认上下文</h4>
+          <OutputBlock
+            label="外层 AI 需要向人确认的问题"
+            tone="warning"
+            value={item.confirmation_question || item.last_error || '未记录问题'}
+          />
+          {item.confirmation_answer ? (
+            <OutputBlock label="已写回的确认答案" tone="neutral" value={item.confirmation_answer} />
+          ) : (
+            <div style={historyHintStyle}>
+              推荐由外层 AI 通过 Skill 或 /api/items/answer 写回答案并恢复，不需要人逐项操作。
+            </div>
+          )}
+        </section>
+      ) : null}
+
       <div style={detailsGridStyle}>
         <section>
           <h4 style={detailsHeadingStyle}>本轮执行尝试 ({attempts.length})</h4>
@@ -562,6 +580,12 @@ const paramDetailsStyle: React.CSSProperties = {
   borderRadius: '18px',
   border: '1px solid #e5eaf2',
   boxShadow: '0 8px 24px rgba(15, 23, 42, 0.04)',
+}
+
+const confirmationDetailsStyle: React.CSSProperties = {
+  ...paramDetailsStyle,
+  borderColor: '#bfdbfe',
+  backgroundColor: '#f8fbff',
 }
 
 const paramDetailsHeaderStyle: React.CSSProperties = {

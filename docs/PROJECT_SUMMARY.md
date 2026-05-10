@@ -33,7 +33,7 @@ qcloop 是一个**程序驱动的批量测试编排工具**，用于自动化执
 - [x] worker -> verifier -> repair 流程
 - [x] 自动返修机制
 - [x] 最大轮次控制（max_qc_rounds）
-- [x] 状态管理（pending/running/success/failed/exhausted）
+- [x] 状态管理（pending/running/success/failed/exhausted/awaiting_confirmation）
 
 #### 3. 执行器（Executor）
 - [x] Provider Adapter 实现

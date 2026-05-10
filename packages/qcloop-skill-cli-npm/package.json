@@ -1,0 +1,38 @@
+{
+  "name": "@limecloud/qcloop-skill-cli",
+  "version": "0.5.0",
+  "description": "qcloop 技能 JSON CLI，供 AI agent 创建、启动、观察批量 QA loop",
+  "bin": {
+    "qcloop-skill": "scripts/run.js"
+  },
+  "scripts": {
+    "test": "node --check scripts/run.js && node scripts/run.js --help >/dev/null",
+    "prepack": "npm test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/limecloud/qcloop.git"
+  },
+  "homepage": "https://github.com/limecloud/qcloop#readme",
+  "bugs": {
+    "url": "https://github.com/limecloud/qcloop/issues"
+  },
+  "keywords": [
+    "qcloop",
+    "ai-agent",
+    "skills",
+    "qa",
+    "codex"
+  ],
+  "license": "MIT",
+  "files": [
+    "README.md",
+    "scripts/run.js"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

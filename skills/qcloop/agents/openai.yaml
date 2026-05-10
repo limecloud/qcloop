@@ -1,0 +1,4 @@
+interface:
+  display_name: "qcloop"
+  short_description: "用 JSON CLI 驱动 qcloop 批量质检闭环"
+  default_prompt: "使用 $qcloop 和 qcloop-skill CLI 读取本地说明，并测试当前任务。"

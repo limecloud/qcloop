@@ -10,7 +10,7 @@ export interface BatchJob {
   execution_mode: string // "standard" | "goal_assisted"
   executor_provider: ExecutorProvider
   run_no: number
-  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'waiting_confirmation' | 'paused' | 'completed' | 'failed'
   created_at: string
   finished_at: string | null
 }
@@ -21,7 +21,7 @@ export interface BatchItem {
   id: string
   batch_job_id: string
   item_value: string
-  status: 'pending' | 'running' | 'success' | 'failed' | 'exhausted'
+  status: 'pending' | 'running' | 'success' | 'failed' | 'exhausted' | 'awaiting_confirmation'
   current_attempt_no: number
   current_qc_no: number
   tokens_used: number
@@ -29,6 +29,8 @@ export interface BatchItem {
   lock_expires_at: string | null
   queued_at: string | null
   last_error: string
+  confirmation_question: string
+  confirmation_answer: string
   created_at: string
   finished_at: string | null
   attempts: Attempt[]
@@ -71,7 +73,8 @@ export interface CreateJobRequest {
   token_budget_per_item?: number
   execution_mode?: string // "standard" | "goal_assisted"
   executor_provider?: ExecutorProvider
-  items: string[]
+  items?: string[]
+  items_text?: string
 }
 
 export interface UpdateJobRequest {

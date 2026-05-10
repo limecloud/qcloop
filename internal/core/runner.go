@@ -93,6 +93,16 @@ func (r *Runner) emitJobUpdate(jobID string) {
 	r.broadcaster.BroadcastJobUpdate(jobID, job)
 }
 
+// EmitItemUpdate 对 API 层暴露一次 item 快照广播,用于 answer/resume 等非 Runner 内部动作。
+func (r *Runner) EmitItemUpdate(jobID, itemID string) {
+	r.emitItemUpdate(jobID, itemID)
+}
+
+// EmitJobUpdate 对 API 层暴露一次 job 快照广播。
+func (r *Runner) EmitJobUpdate(jobID string) {
+	r.emitJobUpdate(jobID)
+}
+
 // setItemStatus 更新 item 状态并广播。集中一处避免忘记广播。
 func (r *Runner) setItemStatus(jobID, itemID, status string) error {
 	var err error
@@ -372,7 +382,7 @@ func (r *Runner) chargeItemTokens(itemID string, delta int) (int, error) {
 
 // executeWorker 执行 worker 或 repair
 func (r *Runner) executeWorker(ctx context.Context, exec executor.Executor, job *db.BatchJob, item *db.BatchItem, attemptNo int, attemptType string) (*db.Attempt, error) {
-	prompt := strings.ReplaceAll(job.PromptTemplate, "{{item}}", item.ItemValue)
+	prompt := renderWorkerPrompt(job.PromptTemplate, item)
 	return r.executeWorkerPrompt(ctx, exec, prompt, item, job.RunNo, attemptNo, attemptType)
 }
 
@@ -452,6 +462,20 @@ func (r *Runner) runQCLoop(ctx context.Context, exec executor.Executor, job *db.
 		if qcRound.Status == "pass" {
 			// 质检通过
 			return r.setItemStatus(job.ID, item.ID, "success")
+		}
+		if qcRound.NeedsConfirmation {
+			question := qcRound.Question
+			if question == "" {
+				question = qcRound.Feedback
+			}
+			if question == "" {
+				question = "verifier 请求外层 AI 获取人类确认"
+			}
+			if err := r.database.MarkItemAwaitingConfirmation(item.ID, question); err != nil {
+				return err
+			}
+			r.emitItemUpdate(job.ID, item.ID)
+			return nil
 		}
 
 		// 质检失败
@@ -577,8 +601,17 @@ func (r *Runner) executeVerifier(ctx context.Context, exec executor.Executor, jo
 			qcRound.Status = "pass"
 		} else {
 			qcRound.Status = "fail"
+			if needsConfirmation, ok := verdict["needs_confirmation"].(bool); ok && needsConfirmation {
+				qcRound.NeedsConfirmation = true
+			}
+			if question, ok := verdict["question"].(string); ok {
+				qcRound.Question = strings.TrimSpace(question)
+			}
 			if feedback, ok := verdict["feedback"].(string); ok {
 				qcRound.Feedback = feedback
+			}
+			if qcRound.NeedsConfirmation && qcRound.Feedback == "" {
+				qcRound.Feedback = qcRound.Question
 			}
 		}
 		qcRound.Verdict = stdout
@@ -608,7 +641,7 @@ func (r *Runner) executeRepair(ctx context.Context, exec executor.Executor, job 
 		return nil, fmt.Errorf("没有找到执行记录")
 	}
 	lastAttempt := attempts[len(attempts)-1]
-	prompt := buildRepairPrompt(job.PromptTemplate, item.ItemValue, lastAttempt, feedback)
+	prompt := buildRepairPrompt(job.PromptTemplate, item, lastAttempt, feedback)
 
 	return r.executeWorkerPrompt(ctx, exec, prompt, item, job.RunNo, attemptNo, "repair")
 }
@@ -624,8 +657,27 @@ func renderVerifierPrompt(template, itemValue string, attempt *db.Attempt) strin
 	return prompt
 }
 
-func buildRepairPrompt(template, itemValue string, attempt *db.Attempt, feedback string) string {
-	basePrompt := strings.ReplaceAll(template, "{{item}}", itemValue)
+func renderWorkerPrompt(template string, item *db.BatchItem) string {
+	basePrompt := strings.ReplaceAll(template, "{{item}}", item.ItemValue)
+	if strings.TrimSpace(item.ConfirmationAnswer) == "" {
+		return basePrompt
+	}
+	return fmt.Sprintf(`%s
+
+---
+qcloop 确认上下文:
+- 待确认问题: %s
+- 人类确认答案: %s
+
+请基于这份确认继续执行当前 item,不要再把同一问题交还给人类。`,
+		basePrompt,
+		clipForPrompt(item.ConfirmationQuestion),
+		clipForPrompt(item.ConfirmationAnswer),
+	)
+}
+
+func buildRepairPrompt(template string, item *db.BatchItem, attempt *db.Attempt, feedback string) string {
+	basePrompt := renderWorkerPrompt(template, item)
 	return fmt.Sprintf(`%s
 
 ---
@@ -653,7 +705,7 @@ func buildRepairPrompt(template, itemValue string, attempt *db.Attempt, feedback
 3. 最终输出修改文件、验证命令、验证结果和剩余风险。
 4. 除非人类明确授权,不要执行 git commit / git push / git reset。`,
 		basePrompt,
-		itemValue,
+		item.ItemValue,
 		attempt.AttemptType,
 		attempt.Status,
 		formatExitCode(attempt.ExitCode),

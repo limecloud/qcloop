@@ -20,27 +20,29 @@ type BatchJob struct {
 	ExecutionMode          string     `json:"execution_mode"`        // standard | goal_assisted
 	ExecutorProvider       string     `json:"executor_provider"`     // codex | claude_code | gemini_cli | kiro_cli
 	RunNo                  int        `json:"run_no"`                // 当前运行轮次,从 1 开始
-	Status                 string     `json:"status"`                // pending/running/completed/failed/paused
+	Status                 string     `json:"status"`                // pending/running/waiting_confirmation/completed/failed/paused
 	CreatedAt              time.Time  `json:"created_at"`
 	FinishedAt             *time.Time `json:"finished_at"`
 }
 
 // BatchItem 批次项
 type BatchItem struct {
-	ID               string     `json:"id"`
-	BatchJobID       string     `json:"batch_job_id"`
-	ItemValue        string     `json:"item_value"`
-	Status           string     `json:"status"` // pending/running/success/failed/exhausted
-	CurrentAttemptNo int        `json:"current_attempt_no"`
-	CurrentQCNo      int        `json:"current_qc_no"`
-	TokensUsed       int        `json:"tokens_used"`       // 已使用的 token 数量
-	TimeUsedSeconds  int        `json:"time_used_seconds"` // 已使用的时间（秒）
-	LockOwner        string     `json:"lock_owner"`        // 当前队列 worker 租约持有者
-	LockExpiresAt    *time.Time `json:"lock_expires_at"`   // 租约过期时间
-	QueuedAt         *time.Time `json:"queued_at"`         // 最近一次入队时间
-	LastError        string     `json:"last_error"`        // 队列恢复/执行层面的最近错误
-	CreatedAt        time.Time  `json:"created_at"`
-	FinishedAt       *time.Time `json:"finished_at"`
+	ID                   string     `json:"id"`
+	BatchJobID           string     `json:"batch_job_id"`
+	ItemValue            string     `json:"item_value"`
+	Status               string     `json:"status"` // pending/running/success/failed/exhausted/awaiting_confirmation
+	CurrentAttemptNo     int        `json:"current_attempt_no"`
+	CurrentQCNo          int        `json:"current_qc_no"`
+	TokensUsed           int        `json:"tokens_used"`           // 已使用的 token 数量
+	TimeUsedSeconds      int        `json:"time_used_seconds"`     // 已使用的时间（秒）
+	LockOwner            string     `json:"lock_owner"`            // 当前队列 worker 租约持有者
+	LockExpiresAt        *time.Time `json:"lock_expires_at"`       // 租约过期时间
+	QueuedAt             *time.Time `json:"queued_at"`             // 最近一次入队时间
+	LastError            string     `json:"last_error"`            // 队列恢复/执行层面的最近错误
+	ConfirmationQuestion string     `json:"confirmation_question"` // 需要外层 AI 向人确认的问题
+	ConfirmationAnswer   string     `json:"confirmation_answer"`   // 外层 AI 写回的人类确认答案
+	CreatedAt            time.Time  `json:"created_at"`
+	FinishedAt           *time.Time `json:"finished_at"`
 }
 
 // Attempt 执行尝试
@@ -61,14 +63,16 @@ type Attempt struct {
 
 // QCRound 质检轮次
 type QCRound struct {
-	ID          string     `json:"id"`
-	BatchItemID string     `json:"batch_item_id"`
-	QCNo        int        `json:"qc_no"`
-	RunNo       int        `json:"run_no"`
-	Status      string     `json:"status"` // running/pass/fail
-	Verdict     string     `json:"verdict"`
-	Feedback    string     `json:"feedback"`
-	TokensUsed  int        `json:"tokens_used"` // 本次质检使用的 token 数量
-	StartedAt   time.Time  `json:"started_at"`
-	FinishedAt  *time.Time `json:"finished_at"`
+	ID                string     `json:"id"`
+	BatchItemID       string     `json:"batch_item_id"`
+	QCNo              int        `json:"qc_no"`
+	RunNo             int        `json:"run_no"`
+	Status            string     `json:"status"` // running/pass/fail
+	Verdict           string     `json:"verdict"`
+	Feedback          string     `json:"feedback"`
+	NeedsConfirmation bool       `json:"needs_confirmation,omitempty"`
+	Question          string     `json:"question,omitempty"`
+	TokensUsed        int        `json:"tokens_used"` // 本次质检使用的 token 数量
+	StartedAt         time.Time  `json:"started_at"`
+	FinishedAt        *time.Time `json:"finished_at"`
 }

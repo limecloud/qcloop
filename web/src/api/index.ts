@@ -68,6 +68,13 @@ export const api = {
       body: JSON.stringify({ job_id: jobId }),
     }),
 
+  // 写回外层 AI 获取到的人类确认答案
+  answerItem: (itemId: string, answer: string, resume = true): Promise<{ status: string }> =>
+    request<{ status: string }>('/items/answer', {
+      method: 'POST',
+      body: JSON.stringify({ item_id: itemId, answer, resume }),
+    }),
+
   // 获取批次项
   listItems: (jobId: string): Promise<BatchItem[]> =>
     request<BatchItem[]>(`/items/?job_id=${jobId}`),

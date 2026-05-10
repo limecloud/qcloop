@@ -1,8 +1,8 @@
 # qcloop — Full Reference for AI Agents
 
 > 本文件是 qcloop 的完整 AI-facing 参考。读完本文后你应当能独立完成
-> "创建批次 → 启动 → 轮询 → 解读结果 → 决定是否重试"的全流程,不需要
-> 再读其他文件。人类只通过 http://localhost:3000 的 Web 面板监管。
+> "创建批次 → 启动 → 轮询 → 解读结果 → 必要时向人确认 → 写回答案继续 → 决定是否重试"的全流程,不需要
+> 再读其他文件。人类只负责下发意图、授权和必要确认;不要让人类手动提单或逐项操作。
 
 ---
 
@@ -19,8 +19,14 @@ qcloop 保证:
 - 全局 worker pool 默认并发 2 个 item,用 SQLite lease 做断点恢复
 - 每次执行后(可选)由独立 verifier 审查;fail 则自动 repair,repair 会拿到上一轮 stdout/stderr/exit_code 和 verifier feedback,用于直接修复问题并复测
 - 达到 `max_qc_rounds` 轮仍未通过 → 标记 `exhausted`
+- 遇到 AI 无法判断或高风险动作 → 标记 `awaiting_confirmation`,由外层 AI 向人提问并写回答案继续
 - 超出 `token_budget_per_item` → 提前 `exhausted` 熔断
 - 全部状态落 SQLite,Web 面板实时可见
+
+qcloop 有两条 AI 主入口:
+
+1. **Skill 入口**:如果当前 agent 支持技能,优先使用 `skills/qcloop` 和 `qcloop-skill`。
+2. **llm.txt 入口**:如果没有技能,读取 `http://localhost:3000/llm.txt` / `http://localhost:3000/llm-full.txt`,按本文 HTTP API 契约操作。
 
 人类通常先打开 qcloop,再对 Codex / Claude Code / Gemini CLI / Kiro CLI 说:
 `请读取 http://localhost:3000/llm-full.txt，然后使用 qcloop 帮我测试当前任务。`
@@ -30,14 +36,15 @@ qcloop 保证:
 
 ## 2. AI 与人如何配合(必须遵守)
 
-如果你是正在阅读本文的 AI agent,你的职责是**自己调用 qcloop API 提单**,
-不要让人类手动填写 Web UI。人类只负责打开 qcloop 应用、选择权限、打开面板监管。
+如果你是正在阅读本文的 AI agent,你的职责是**自己通过 Skill CLI 或 HTTP API 提单并推进**,
+不要让人类手动填写 Web UI、手动重试或逐项处理。人类只负责打开 qcloop 应用、选择权限、给出目标和必要确认。
 
 ### 2.1 开始前先做 4 件事
 
 1. 确认 qcloop 可访问:
    - `GET http://localhost:3000/llm-full.txt`
    - `GET http://localhost:8080/api/jobs`
+   - 如果全局 `qcloop-skill` 或仓库内 `skills/qcloop/bin/qcloop-skill` 可用,优先运行 `qcloop-skill doctor` 或 `skills/qcloop/bin/qcloop-skill doctor`,读取结构化 JSON 结果。这是 Skill 入口。
 2. 如果 API 不通,请告诉人类先打开 qcloop 应用或恢复本地服务,并确认 Web 面板与 `llm-full.txt` 可访问;不要把后端/前端启动命令作为普通用户主路径。
 3. 如果你是 Codex TUI,且需要访问 localhost / 目标仓库 / 网络,提示人类可输入
    `/permissions` 并选择 `Full Access`。如果人类平时不用 sandbox,不要强制他
@@ -54,11 +61,15 @@ qcloop 保证:
 - 写 `prompt_template`,其中必须包含 `{{item}}`
 - 写 `verifier_prompt_template`,输出严格 JSON:
   `{"pass": true|false, "feedback": "..."}`
+  如遇到 AI 无法判断或需要风险确认,输出:
+  `{"pass": false, "needs_confirmation": true, "question": "...", "feedback": "..."}`
   Verifier 可使用 `{{output}}`/`{{stdout}}`、`{{stderr}}`、`{{exit_code}}`、`{{attempt_status}}`、`{{attempt_type}}` 占位符判断上一轮执行是否真的通过。
 - 调 `POST /api/jobs` 创建批次;如需指定内层 CLI,传 `executor_provider`
 - 调 `POST /api/jobs/run` 启动批次
+- 如果可用,优先通过 `qcloop-skill job create --file ... --run` 和 `qcloop-skill job wait ...` 调用,而不是手写 curl;该 CLI 默认输出 JSON,失败时 stderr 有 `error_code` / `retryable` / `hint`。
 - 把批次 ID 和 Web 面板地址告诉人类
 - 轮询 `GET /api/items?job_id=...` 和 `GET /api/jobs/:id`
+- 如果发现 item.status=`awaiting_confirmation`,读取 `confirmation_question` 或 `last_error`,向人类提出一个清晰确认问题;拿到答案后调用 `POST /api/items/answer` 或 `qcloop-skill item answer ... --resume` 继续。
 - 完成后总结成功/失败/耗尽项,并引用 attempts / qc_rounds 里的证据
 - 如果测试暴露可修复问题,且人类允许修改工作区,repair 轮次应直接修改代码/文档并重新跑最小验证;未获授权时只报告问题,不要提交或推送。
 
@@ -139,7 +150,7 @@ batch_job (1 个批次)
 | execution_mode | string | `"standard"`(默认)或 `"goal_assisted"`(把 prompt 包装成 Goal 风格,让单次 CLI 调用更收敛) |
 | executor_provider | string | `"codex"`(默认)、`"claude_code"`、`"gemini_cli"`、`"kiro_cli"`;决定内层 worker/verifier/repair 调哪个本机 CLI |
 | run_no | int | 当前运行轮次,从 1 开始;重试未成功项或重跑全部时递增 |
-| status | string | `pending` / `running` / `paused` / `completed` / `failed`;`completed` 表示全部 item 成功,`failed` 表示批次已结束但存在 failed/exhausted item |
+| status | string | `pending` / `running` / `waiting_confirmation` / `paused` / `completed` / `failed`;`completed` 表示全部 item 成功,`failed` 表示批次已结束但存在 failed/exhausted item,`waiting_confirmation` 表示当前只剩待确认 item |
 | created_at | string (RFC3339) | |
 | finished_at | string (RFC3339) | |
 
@@ -150,7 +161,7 @@ batch_job (1 个批次)
 | id | string | |
 | batch_job_id | string | 外键 |
 | item_value | string | 单个测试项的值,会被注入 prompt 的 `{{item}}` |
-| status | string | `pending` / `running` / `success` / `failed` / `exhausted` |
+| status | string | `pending` / `running` / `success` / `failed` / `exhausted` / `awaiting_confirmation` |
 | current_attempt_no | int | 当前 attempt 编号 |
 | current_qc_no | int | 当前质检轮次 |
 | tokens_used | int | 已消耗 token(累加 worker+repair+verifier) |
@@ -158,9 +169,11 @@ batch_job (1 个批次)
 | lock_expires_at | RFC3339 | 租约过期时间;默认 15 分钟未续租会被回收到 pending |
 | queued_at | RFC3339 | 最近一次进入队列的时间 |
 | last_error | string | 队列恢复或执行层最近错误 |
+| confirmation_question | string | verifier 要求外层 AI 向人确认的问题 |
+| confirmation_answer | string | 外层 AI 写回的人类确认答案 |
 | created_at / finished_at | RFC3339 | |
 
-**终态**:`success`(通过) / `failed`(worker 或 repair 非 0 退出) / `exhausted`(预算或轮次用尽)。
+**终态**:`success`(通过) / `failed`(worker 或 repair 非 0 退出) / `exhausted`(预算或轮次用尽)。`awaiting_confirmation` 不是终态,外层 AI 必须提问并写回答案。
 
 ### 4.3 attempt
 
@@ -180,7 +193,7 @@ batch_job (1 个批次)
 | qc_no | 1, 2, 3... 同一 item 下唯一 |
 | run_no | 所属运行轮次,用于区分当前轮与历史记录 |
 | status | `running` / `pass` / `fail` |
-| verdict | JSON 字符串,形如 `{"pass": true, "feedback": "..."}` |
+| verdict | JSON 字符串,形如 `{"pass": true, "feedback": "..."}`;需要确认时可为 `{"pass": false, "needs_confirmation": true, "question": "...", "feedback": "..."}` |
 | feedback | 从 verdict.feedback 抽出来的,repair 时会注入 prompt |
 
 ---
@@ -203,9 +216,12 @@ batch_job (1 个批次)
   "token_budget_per_item": 0,
   "execution_mode": "standard",
   "executor_provider": "codex",
-  "items": ["item1", "item2", "item3"]
+  "items": ["item1", "item2", "item3"],
+  "items_text": "item1\n{\"name\":\"review doc\",\"target\":\"docs/a.md\"}"
 }
 ```
+
+`items` 和 `items_text` 二选一即可;两者同时存在时优先 `items`。`items_text` 是每行一个 item;合法 JSON object 行会被压缩成 JSON 字符串保存,普通文本行按原文本保存。
 
 响应 200:
 ```json
@@ -256,15 +272,38 @@ batch_job (1 个批次)
 
 响应 `{ "status": "started" }`。等价于用 `mode=continue` 重新入队,从 pending item 和租约过期的 running item 继续。
 
-### 5.5 GET /api/jobs — 列出所有批次
+### 5.5 POST /api/items/answer — 写回确认答案
+
+当 `GET /api/items` 里某个 item 的 `status` 为 `awaiting_confirmation` 时,外层 AI 必须向人类确认,然后调用本接口写回答案。
+
+请求体:
+```json
+{
+  "item_id": "xxx",
+  "answer": "允许修改文档,但不要 git commit/push",
+  "resume": true
+}
+```
+
+响应:
+```json
+{
+  "status": "answered",
+  "item": { "status": "pending" }
+}
+```
+
+`resume=true` 会把该 item 重新入队并唤醒 worker。下一轮 worker/repair prompt 会自动包含 `confirmation_question` 和 `confirmation_answer`。
+
+### 5.6 GET /api/jobs — 列出所有批次
 
 返回 BatchJob 数组(按 created_at DESC)。
 
-### 5.6 GET /api/jobs/:id — 获取单个批次
+### 5.7 GET /api/jobs/:id — 获取单个批次
 
 返回 BatchJob 对象。
 
-### 5.7 GET /api/items?job_id=xxx — 批次项详情
+### 5.8 GET /api/items?job_id=xxx — 批次项详情
 
 返回所有 batch_item,**每个 item 嵌套了它的 attempts 和 qc_rounds**:
 
@@ -284,11 +323,36 @@ batch_job (1 个批次)
 ]
 ```
 
-AI agent 判断单个 item 时应读 `status`,要深入分析失败原因时读 `attempts[*].stderr` 和 `qc_rounds[*].feedback`。
+AI agent 判断单个 item 时应读 `status`:失败原因看 `attempts[*].stderr` 和 `qc_rounds[*].feedback`;待确认看 `confirmation_question` 或 `last_error`,然后向人类提问并调用 `/api/items/answer`。
 
 ---
 
 ## 6. 典型工作流(AI agent 模板)
+
+### 6.0 推荐:使用 qcloop 技能 CLI
+
+如果全局安装了 npm 包 `@limecloud/qcloop-skill-cli`,或当前仓库带有 `skills/qcloop/bin/qcloop-skill`,优先使用 `qcloop-skill`。它参考 Lime CLI 风格,默认输出结构化 JSON,避免手写 curl:
+
+```bash
+qcloop-skill doctor
+qcloop-skill guide --full --raw
+qcloop-skill job create --file /tmp/qcloop-job.json --run
+qcloop-skill job wait <job_id> --timeout 1800
+qcloop-skill job status <job_id> --include-items
+qcloop-skill item answer <item_id> --answer "允许继续,但不要提交" --resume
+qcloop-skill job run <job_id> --mode retry_unfinished
+
+# 没有全局命令时使用仓库内置版本
+skills/qcloop/bin/qcloop-skill doctor
+skills/qcloop/bin/qcloop-skill guide --full --raw
+skills/qcloop/bin/qcloop-skill job create --file /tmp/qcloop-job.json --run
+skills/qcloop/bin/qcloop-skill job wait <job_id> --timeout 1800
+skills/qcloop/bin/qcloop-skill job status <job_id> --include-items
+skills/qcloop/bin/qcloop-skill item answer <item_id> --answer "允许继续,但不要提交" --resume
+skills/qcloop/bin/qcloop-skill job run <job_id> --mode retry_unfinished
+```
+
+原始 API 仍然可用;当 CLI 不在当前环境或需要精确排障时再使用下面的 curl 示例。
 
 ### 6.1 基础:无质检
 
@@ -311,11 +375,11 @@ curl -X POST http://localhost:8080/api/jobs/run \
 
 # 3. 轮询(建议 3~5s 间隔)
 curl "http://localhost:8080/api/items/?job_id=abc-123"
-# 直到所有 item.status 都 ∈ {success, failed, exhausted}
+# 直到所有 item.status 都 ∈ {success, failed, exhausted},或出现 awaiting_confirmation 需要向人确认
 
 # 4. 读批次聚合状态
 curl http://localhost:8080/api/jobs/abc-123
-# job.status == "completed" 表示全部 item 成功;"failed" 表示批次已结束但存在 failed/exhausted item
+# job.status == "completed" 表示全部 item 成功;"failed" 表示批次已结束但存在 failed/exhausted item;"waiting_confirmation" 表示外层 AI 需要提问并写回答案
 ```
 
 ### 6.2 完整:带质检 + 预算 + Goal 风格
@@ -343,6 +407,11 @@ curl -X POST http://localhost:8080/api/jobs \
 for item in items:
     if item.status == "success":
         ✅ 完成,使用 item.attempts[-1].stdout 作为产物
+    elif item.status == "awaiting_confirmation":
+        ❓ 需要确认。读取 item.confirmation_question 或 item.last_error,向人类提出一个具体问题。
+           拿到答案后调用:
+           POST /api/items/answer {"item_id": item.id, "answer": "...", "resume": true}
+           或 qcloop-skill item answer <item_id> --answer "..." --resume
     elif item.status == "exhausted":
         ⚠️ 质检始终不过或超预算。看 item.qc_rounds[-1].feedback 分析原因。
             - 如果 feedback 说"任务本身模糊" → 改 prompt_template 重新提单
@@ -430,13 +499,13 @@ HTTP 响应状态:
 
 ## 10. 面板 URL 速查
 
-人类监管面板:http://localhost:3000
+人类观察面板:http://localhost:3000
 
 - 列表页:显示所有批次,状态徽章、创建时间、测试项数
-- 详情页:统计卡片(总数/成功/失败/进行中/待处理/已耗尽)+ 表格
+- 详情页:统计卡片(总数/成功/失败/进行中/待处理/已耗尽/待确认)+ 表格
 - 每行可展开查看 attempts 和 qc_rounds 完整历史
 - 右上角 "📥 导出" 可下载 JSON/CSV/Markdown 报告
-- 详情页 "⏸ 暂停" / "▶ 恢复" 按钮手动干预
+- 详情页 "⏸ 暂停" / "▶ 恢复" 按钮仅作兜底调试;推荐由外层 AI 调 API
 
 **AI agent 无需访问面板**,只读 API 即可。
 
@@ -447,8 +516,8 @@ HTTP 响应状态:
 向 qcloop 提单前,检查这 7 点:
 
 1. `prompt_template` 里有且只有 `{{item}}` 占位符
-2. 若配置 `verifier_prompt_template`,它必须返回**单一 JSON 对象**,且有 `pass` 和 `feedback` 两个字段
-3. `items` 数组元素适合被塞进 `{{item}}`(多数情况下是文件路径、ID 或短字符串)
+2. 若配置 `verifier_prompt_template`,它必须返回**单一 JSON 对象**,且有 `pass` 和 `feedback` 两个字段;需要确认时加 `needs_confirmation` 和 `question`
+3. `items` 数组或 `items_text` 每行 item 适合被塞进 `{{item}}`(多数情况下是文件路径、ID、JSON object 或短字符串)
 4. `max_qc_rounds` 合理:通常 3~5。`1` 只会 worker + verifier,不会进入 repair;过大浪费 token,过小可能误判
 5. `token_budget_per_item` 合理:代码类任务给 30k~100k,文档类给 10k~30k
 6. 创建后**务必调 `/api/jobs/run`**,不然永远停在 pending;重试未成功项用 `mode=retry_unfinished`

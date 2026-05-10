@@ -33,6 +33,7 @@ export function exportToJSON(job: BatchJob, items: BatchItem[]): void {
       running: items.filter((i) => i.status === 'running').length,
       pending: items.filter((i) => i.status === 'pending').length,
       exhausted: items.filter((i) => i.status === 'exhausted').length,
+      awaiting_confirmation: items.filter((i) => i.status === 'awaiting_confirmation').length,
     },
     exported_at: new Date().toISOString(),
   }
@@ -62,6 +63,8 @@ export function exportToCSV(job: BatchJob, items: BatchItem[]): void {
     '首次执行状态',
     '最终输出',
     '质检结果',
+    '待确认问题',
+    '确认答案',
   ]
 
   // CSV 数据行
@@ -80,6 +83,8 @@ export function exportToCSV(job: BatchJob, items: BatchItem[]): void {
       firstAttempt?.status || '',
       firstAttempt?.stdout?.replace(/[\r\n]+/g, ' ').substring(0, 100) || '',
       lastQC?.verdict || '',
+      item.confirmation_question || '',
+      item.confirmation_answer || '',
     ]
   })
 
@@ -111,7 +116,8 @@ export function exportToMarkdown(job: BatchJob, items: BatchItem[]): void {
     failed: items.filter((i) => i.status === 'failed').length,
     running: items.filter((i) => i.status === 'running').length,
     pending: items.filter((i) => i.status === 'pending').length,
-    exhausted: items.filter((i) => i.status === 'exhausted').length,
+      exhausted: items.filter((i) => i.status === 'exhausted').length,
+      awaiting_confirmation: items.filter((i) => i.status === 'awaiting_confirmation').length,
   }
 
   const content = `# qcloop 批次报告
@@ -137,6 +143,7 @@ export function exportToMarkdown(job: BatchJob, items: BatchItem[]): void {
 | 🟡 进行中 | ${stats.running} | ${((stats.running / stats.total) * 100).toFixed(1)}% |
 | ⏳ 待处理 | ${stats.pending} | ${((stats.pending / stats.total) * 100).toFixed(1)}% |
 | ⚠️ 已耗尽 | ${stats.exhausted} | ${((stats.exhausted / stats.total) * 100).toFixed(1)}% |
+| ❓ 待确认 | ${stats.awaiting_confirmation} | ${((stats.awaiting_confirmation / stats.total) * 100).toFixed(1)}% |
 
 ## 测试项详情
 
@@ -150,6 +157,8 @@ ${items
 - **质检轮次**: ${item.current_qc_no}
 - **创建时间**: ${item.created_at ? new Date(item.created_at).toLocaleString('zh-CN') : '-'}
 - **完成时间**: ${item.finished_at ? new Date(item.finished_at).toLocaleString('zh-CN') : '-'}
+${item.confirmation_question ? `- **待确认问题**: ${item.confirmation_question}` : ''}
+${item.confirmation_answer ? `- **确认答案**: ${item.confirmation_answer}` : ''}
 
 ${
   item.attempts && item.attempts.length > 0

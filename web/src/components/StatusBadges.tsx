@@ -21,6 +21,7 @@ export function StatusBadge({ status }: { status: string }) {
     success: { bg: '#e8f8ed', color: '#23834b', label: '成功' },
     failed: { bg: '#ffe8e8', color: '#d32f2f', label: '失败' },
     exhausted: { bg: '#fff1db', color: '#a85d11', label: '已耗尽' },
+    awaiting_confirmation: { bg: '#eaf2ff', color: '#1d4ed8', label: '待确认' },
     pass: { bg: '#e8f8ed', color: '#23834b', label: '通过' },
     fail: { bg: '#ffe8e8', color: '#d32f2f', label: '未通过' },
   }
@@ -58,6 +59,7 @@ export function StageLabel({ status }: { status: string }) {
     success: '质检通过',
     failed: '执行失败',
     exhausted: '修复耗尽',
+    awaiting_confirmation: '等待确认',
   }
   return <span style={stageTextStyle}>{labels[status] || status}</span>
 }
@@ -70,6 +72,7 @@ export function QueueLabel({ status }: { status: string }) {
     success: { bg: '#effce9', color: '#4f9f22', label: '已结束' },
     failed: { bg: '#ffe8e8', color: '#d32f2f', label: '已结束' },
     exhausted: { bg: '#fff1db', color: '#a85d11', label: '已结束' },
+    awaiting_confirmation: { bg: '#eaf2ff', color: '#1d4ed8', label: '待确认' },
   }
   const style = styles[status] || styles.pending
   return (
@@ -139,6 +142,7 @@ function terminalSummaryLabel(status: string) {
     success: '本轮通过',
     failed: '本轮失败',
     exhausted: '本轮耗尽',
+    awaiting_confirmation: '等待确认',
   }
   return labels[status] || status
 }
@@ -151,6 +155,7 @@ function qcStatusLabel(status: string) {
     success: '通过',
     failed: '失败',
     exhausted: '已耗尽',
+    awaiting_confirmation: '待确认',
   }
   return labels[status] || status
 }
@@ -176,12 +181,16 @@ function ProcessChip({ label, tone }: { label: string; tone: string }) {
     ? '#d6e9dc'
     : tone === 'fail' || tone === 'failed'
       ? '#f2c7c7'
-      : '#dce5ef'
+      : tone === 'awaiting_confirmation'
+        ? '#bfdbfe'
+        : '#dce5ef'
   const color = tone === 'pass' || tone === 'success'
     ? '#0f5132'
     : tone === 'fail' || tone === 'failed'
       ? '#991b1b'
-      : '#0f172a'
+      : tone === 'awaiting_confirmation'
+        ? '#1d4ed8'
+        : '#0f172a'
 
   return (
     <span
@@ -234,6 +243,9 @@ export function QCSummary({ item, maxQCRounds, runNo }: Props) {
   }
   if (item.status === 'pending') {
     return <span style={mutedTextStyle}>未开始</span>
+  }
+  if (item.status === 'awaiting_confirmation') {
+    return <span style={qcTextStyle}>等待外层 AI 获取确认</span>
   }
   if (qcRounds.length > 0) {
     return (

@@ -207,8 +207,11 @@ export function App() {
   const isTerminal = jobStatus === 'completed' || jobStatus === 'failed'
   const isActive = jobStatus === 'running' || (running && !isTerminal)
   const isPaused = jobStatus === 'paused'
+  const isWaitingConfirmation = jobStatus === 'waiting_confirmation'
   const unfinishedCount = items.filter((item) => item.status !== 'success').length
-  const runButtonLabel = isTerminal
+  const runButtonLabel = jobStatus === 'waiting_confirmation'
+    ? '等待 AI 确认'
+    : isTerminal
     ? (unfinishedCount > 0 ? `↻ 重试未成功项 (${unfinishedCount})` : '↻ 重新运行全部')
     : '▶ 运行批次'
 
@@ -231,6 +234,7 @@ export function App() {
     running: items.filter((i) => i.status === 'running').length,
     pending: items.filter((i) => i.status === 'pending').length,
     exhausted: items.filter((i) => i.status === 'exhausted').length,
+    awaiting: items.filter((i) => i.status === 'awaiting_confirmation').length,
   }
   const terminalProblemCount = stats.failed + stats.exhausted
   const jobPageCount = Math.max(1, Math.ceil(jobs.length / JOB_PAGE_SIZE))
@@ -366,13 +370,14 @@ export function App() {
                 ) : (
                   <button
                     onClick={handleRun}
+                    disabled={isWaitingConfirmation}
                     style={{
                       padding: '10px 18px',
-                      backgroundColor: '#2d7a2d',
+                      backgroundColor: isWaitingConfirmation ? '#e5e7eb' : '#2d7a2d',
                       color: '#fff',
                       border: 'none',
                       borderRadius: '4px',
-                      cursor: 'pointer',
+                      cursor: isWaitingConfirmation ? 'not-allowed' : 'pointer',
                       fontSize: '18px',
                     }}
                   >
@@ -435,8 +440,19 @@ export function App() {
               <StatCard label="进行中" value={stats.running} color="#f57c00" />
               <StatCard label="待处理" value={stats.pending} color="#666" />
               <StatCard label="已耗尽" value={stats.exhausted} color="#f57c00" />
+              <StatCard label="待确认" value={stats.awaiting} color="#1d4ed8" />
               <StatCard label="可重试" value={unfinishedCount} color="#1976d2" />
             </div>
+
+            <LongRunOverview job={currentJob} stats={stats} />
+
+            {stats.awaiting > 0 ? (
+              <div style={confirmationWarningStyle}>
+                <strong>有 {stats.awaiting} 个 item 等待确认。</strong>
+                {' '}
+                推荐由外层 AI 读取状态后向人类提问，再通过 Skill 或 HTTP API 写回答案继续执行；Web 这里只做观察兜底。
+              </div>
+            ) : null}
 
             {terminalProblemCount > 0 ? (
               <div style={terminalWarningStyle}>
@@ -528,6 +544,7 @@ function JobStatusBadge({ status }: { status: string }) {
   const styles: Record<string, { bg: string; color: string; label: string }> = {
     pending: { bg: '#f5f5f5', color: '#666', label: '待运行' },
     running: { bg: '#e3f2fd', color: '#1976d2', label: '运行中' },
+    waiting_confirmation: { bg: '#eaf2ff', color: '#1d4ed8', label: '等待确认' },
     paused: { bg: '#fff4e1', color: '#f57c00', label: '已暂停' },
     completed: { bg: '#e1ffe1', color: '#2d7a2d', label: '全部通过' },
     failed: { bg: '#ffe1e1', color: '#d32f2f', label: '未全部通过' },
@@ -547,6 +564,51 @@ function JobStatusBadge({ status }: { status: string }) {
       {s.label}
     </span>
   )
+}
+
+function LongRunOverview({
+  job,
+  stats,
+}: {
+  job: BatchJob
+  stats: { total: number; success: number; failed: number; running: number; pending: number; exhausted: number; awaiting: number }
+}) {
+  const startedAt = new Date(job.created_at).getTime()
+  const endAt = job.finished_at ? new Date(job.finished_at).getTime() : Date.now()
+  const elapsedSeconds = Math.max(0, Math.round((endAt - startedAt) / 1000))
+  const settled = stats.success + stats.failed + stats.exhausted
+  const avgSeconds = settled > 0 ? elapsedSeconds / settled : 0
+  const runnableRemaining = stats.pending + stats.running
+  const etaSeconds = avgSeconds > 0 && runnableRemaining > 0 ? Math.round(avgSeconds * runnableRemaining) : null
+
+  return (
+    <div style={overviewStyle}>
+      <OverviewMetric label="已耗时" value={formatDuration(elapsedSeconds)} />
+      <OverviewMetric label="完成进度" value={`${settled}/${stats.total}`} />
+      <OverviewMetric label="平均耗时" value={avgSeconds > 0 ? formatDuration(Math.round(avgSeconds)) : '-'} />
+      <OverviewMetric label="预计剩余" value={etaSeconds !== null ? formatDuration(etaSeconds) : '-'} />
+      <OverviewMetric label="待确认" value={`${stats.awaiting}`} />
+    </div>
+  )
+}
+
+function OverviewMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={overviewMetricStyle}>
+      <span style={overviewLabelStyle}>{label}</span>
+      <strong style={overviewValueStyle}>{value}</strong>
+    </div>
+  )
+}
+
+function formatDuration(totalSeconds: number) {
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return '0s'
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m ${seconds}s`
+  return `${seconds}s`
 }
 
 function ProviderBadge({ provider, compact = false }: { provider?: string; compact?: boolean }) {
@@ -684,6 +746,7 @@ function JobRow({
     const labels: Record<string, string> = {
       pending: '待处理',
       running: '运行中',
+      waiting_confirmation: '等待确认',
       paused: '已暂停',
       completed: '全部通过',
       failed: '未全部通过',
@@ -695,6 +758,7 @@ function JobRow({
     const colors: Record<string, { bg: string; color: string }> = {
       pending: { bg: '#fff4e1', color: '#f57c00' },
       running: { bg: '#e3f2fd', color: '#1976d2' },
+      waiting_confirmation: { bg: '#eaf2ff', color: '#1d4ed8' },
       paused: { bg: '#fff4e1', color: '#f57c00' },
       completed: { bg: '#e1ffe1', color: '#2d7a2d' },
       failed: { bg: '#ffe1e1', color: '#b91c1c' },
@@ -851,6 +915,43 @@ const terminalWarningStyle: React.CSSProperties = {
   fontSize: '18px',
   fontWeight: 600,
   lineHeight: 1.55,
+}
+
+const confirmationWarningStyle: React.CSSProperties = {
+  ...terminalWarningStyle,
+  border: '1px solid #bfdbfe',
+  backgroundColor: '#eff6ff',
+  color: '#1d4ed8',
+}
+
+const overviewStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+  gap: '12px',
+  marginBottom: '18px',
+}
+
+const overviewMetricStyle: React.CSSProperties = {
+  padding: '14px 16px',
+  borderRadius: '18px',
+  backgroundColor: '#fff',
+  border: '1px solid #edf1f5',
+  boxShadow: '0 10px 28px rgba(15, 23, 42, 0.035)',
+}
+
+const overviewLabelStyle: React.CSSProperties = {
+  display: 'block',
+  color: '#7b8190',
+  fontSize: '15px',
+  fontWeight: 800,
+}
+
+const overviewValueStyle: React.CSSProperties = {
+  display: 'block',
+  marginTop: '5px',
+  color: '#111827',
+  fontSize: '22px',
+  fontWeight: 900,
 }
 
 const tableContainerStyle: React.CSSProperties = {

@@ -111,6 +111,11 @@ func (q *QueueManager) signal() {
 	}
 }
 
+// Wake 唤醒 worker loop,用于 API 写回答案后立即继续 claim 队列。
+func (q *QueueManager) Wake() {
+	q.signal()
+}
+
 func (q *QueueManager) workerLoop(workerID string) {
 	defer q.wg.Done()
 	ticker := time.NewTicker(q.options.PollInterval)

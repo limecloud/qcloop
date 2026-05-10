@@ -116,7 +116,7 @@ qcloop status --job-id <id>
 - 实时更新（2s 轮询）
 
 **显示内容**：
-- 批次整体状态（pending/running/completed/failed）
+- 批次整体状态（pending/running/waiting_confirmation/completed/failed）
 - 测试项统计（总数/成功/失败/进行中/待处理/已耗尽）
 - 每个 item 的详细状态
 
@@ -145,7 +145,7 @@ CREATE TABLE batch_jobs (
     prompt_template TEXT NOT NULL,
     verifier_prompt_template TEXT,
     max_qc_rounds INTEGER NOT NULL DEFAULT 3,
-    status TEXT NOT NULL,  -- pending/running/completed/failed
+    status TEXT NOT NULL,  -- pending/running/waiting_confirmation/completed/failed
     created_at TEXT NOT NULL,
     finished_at TEXT
 );
@@ -157,7 +157,7 @@ CREATE TABLE batch_items (
     id TEXT PRIMARY KEY,
     batch_job_id TEXT NOT NULL,
     item_value TEXT NOT NULL,
-    status TEXT NOT NULL,  -- pending/running/success/failed/exhausted
+    status TEXT NOT NULL,  -- pending/running/success/failed/exhausted/awaiting_confirmation
     current_attempt_no INTEGER NOT NULL DEFAULT 0,
     current_qc_no INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,

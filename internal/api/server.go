@@ -55,6 +55,7 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/jobs/run", s.handleRunJob)
 	s.mux.HandleFunc("/api/jobs/pause", s.handlePauseJob)
 	s.mux.HandleFunc("/api/jobs/resume", s.handleResumeJob)
+	s.mux.HandleFunc("/api/items/answer", s.handleAnswerItem)
 	s.mux.HandleFunc("/api/items/", s.handleItems)
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
 }
@@ -402,6 +403,68 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(details)
 }
 
+// handleAnswerItem 处理外层 AI 写回的人类确认答案。
+func (s *Server) handleAnswerItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		ItemID string `json:"item_id"`
+		Answer string `json:"answer"`
+		Resume bool   `json:"resume"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.ItemID = strings.TrimSpace(req.ItemID)
+	req.Answer = strings.TrimSpace(req.Answer)
+	if req.ItemID == "" {
+		http.Error(w, "item_id required", http.StatusBadRequest)
+		return
+	}
+	if req.Answer == "" {
+		http.Error(w, "answer required", http.StatusBadRequest)
+		return
+	}
+
+	item, err := s.database.GetItem(req.ItemID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if item == nil {
+		http.Error(w, "item not found", http.StatusNotFound)
+		return
+	}
+	if err := s.database.AnswerItemConfirmation(req.ItemID, req.Answer, req.Resume); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if req.Resume {
+		if err := s.database.StartJob(item.BatchJobID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.queue.Wake()
+	}
+	s.runner.EmitItemUpdate(item.BatchJobID, item.ID)
+	s.runner.EmitJobUpdate(item.BatchJobID)
+
+	fresh, err := s.database.GetItem(req.ItemID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "answered",
+		"item":   fresh,
+	})
+}
+
 // listJobs 列出所有批次
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	if err := s.database.ReconcileAllDoneJobStatuses(); err != nil {
@@ -464,6 +527,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		ExecutionMode          string   `json:"execution_mode"`
 		ExecutorProvider       string   `json:"executor_provider"`
 		Items                  []string `json:"items"`
+		ItemsText              string   `json:"items_text"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -488,6 +552,15 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	items, err := normalizeItems(req.Items, req.ItemsText)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(items) == 0 {
+		http.Error(w, "items or items_text required", http.StatusBadRequest)
+		return
+	}
 
 	job := &db.BatchJob{
 		ID:                     generateID(),
@@ -508,7 +581,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 创建批次项
-	for _, itemValue := range req.Items {
+	for _, itemValue := range items {
 		item := &db.BatchItem{
 			ID:         generateID(),
 			BatchJobID: job.ID,
@@ -524,6 +597,44 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(job)
+}
+
+func normalizeItems(items []string, itemsText string) ([]string, error) {
+	if len(items) > 0 {
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+		return out, nil
+	}
+	return parseItemsText(itemsText)
+}
+
+func parseItemsText(itemsText string) ([]string, error) {
+	lines := strings.Split(itemsText, "\n")
+	items := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(line), &parsed); err == nil {
+			if _, ok := parsed.(map[string]interface{}); ok {
+				compact, err := json.Marshal(parsed)
+				if err != nil {
+					return nil, err
+				}
+				items = append(items, string(compact))
+				continue
+			}
+		}
+		items = append(items, line)
+	}
+	return items, nil
 }
 
 func (s *Server) listAttempts(itemID string) ([]*db.Attempt, error) {

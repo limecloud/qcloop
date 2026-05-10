@@ -210,6 +210,64 @@ func TestRunBatch_Verifier_Exhausted(t *testing.T) {
 	}
 }
 
+func TestRunBatch_VerifierNeedsConfirmationStopsItem(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, `check {{item}}`, 3, []string{"risky-change"})
+
+	fake := executor.NewFakeExecutor(
+		executor.FakeResponse{Stdout: "worker done", ExitCode: 0},
+		executor.FakeResponse{Stdout: `{"pass": false, "needs_confirmation": true, "question": "是否允许修改生成文件？", "feedback": "需要确认风险边界"}`, ExitCode: 0},
+		executor.FakeResponse{Stdout: "should-not-repair", ExitCode: 0},
+	)
+	runner := NewRunnerWithExecutor(database, fake)
+
+	if err := runner.RunBatch(context.Background(), jobID); err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if fake.CallCount() != 2 {
+		t.Fatalf("call count = %d, want worker + verifier only", fake.CallCount())
+	}
+	items, _ := database.ListItems(jobID)
+	if items[0].Status != "awaiting_confirmation" {
+		t.Fatalf("item status = %s, want awaiting_confirmation", items[0].Status)
+	}
+	if !strings.Contains(items[0].ConfirmationQuestion, "是否允许修改生成文件") {
+		t.Fatalf("confirmation question = %q", items[0].ConfirmationQuestion)
+	}
+	job, _ := database.GetJob(jobID)
+	if job.Status != "waiting_confirmation" {
+		t.Fatalf("job status = %s, want waiting_confirmation", job.Status)
+	}
+}
+
+func TestRunBatch_AnsweredConfirmationIsInjectedIntoPrompt(t *testing.T) {
+	database := newTestDB(t)
+	jobID := makeJob(t, database, "", 1, []string{"doc-a"})
+	items, _ := database.ListItems(jobID)
+	if err := database.MarkItemAwaitingConfirmation(items[0].ID, "是否允许修改文档？"); err != nil {
+		t.Fatalf("MarkItemAwaitingConfirmation: %v", err)
+	}
+	if err := database.AnswerItemConfirmation(items[0].ID, "允许修改文档，但不要提交。", true); err != nil {
+		t.Fatalf("AnswerItemConfirmation: %v", err)
+	}
+	if err := database.StartJob(jobID); err != nil {
+		t.Fatalf("StartJob: %v", err)
+	}
+
+	fake := executor.NewFakeExecutor(executor.FakeResponse{Stdout: "ok", ExitCode: 0})
+	runner := NewRunnerWithExecutor(database, fake)
+	if err := runner.RunBatch(context.Background(), jobID); err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	calls := fake.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(calls))
+	}
+	if !strings.Contains(calls[0].Prompt, "qcloop 确认上下文") || !strings.Contains(calls[0].Prompt, "允许修改文档") {
+		t.Fatalf("prompt missing confirmation context: %q", calls[0].Prompt)
+	}
+}
+
 func TestGetJobReconcilesCompletedJobWithExhaustedItems(t *testing.T) {
 	database := newTestDB(t)
 	jobID := makeJob(t, database, "", 1, []string{"ok", "spent"})

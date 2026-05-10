@@ -116,11 +116,12 @@ func TestQueueManagerMarksJobFailedWhenAnyItemFails(t *testing.T) {
 
 func TestPrepareRunModeRetryUnfinishedKeepsSuccessAndQueuesOthers(t *testing.T) {
 	database := newTestDB(t)
-	jobID := makeJob(t, database, "", 1, []string{"ok", "bad", "spent"})
+	jobID := makeJob(t, database, "", 1, []string{"ok", "bad", "spent", "confirm"})
 	items, _ := database.ListItems(jobID)
 	_ = database.FinishItem(items[0].ID, "success")
 	_ = database.FinishItem(items[1].ID, "failed")
 	_ = database.FinishItem(items[2].ID, "exhausted")
+	_ = database.MarkItemAwaitingConfirmation(items[3].ID, "需要确认")
 	_ = database.FinishJob(jobID, "completed")
 
 	runner := NewRunnerWithExecutor(database, executor.NewFakeExecutor())
@@ -142,8 +143,8 @@ func TestPrepareRunModeRetryUnfinishedKeepsSuccessAndQueuesOthers(t *testing.T) 
 	if statuses["ok"] != "success" {
 		t.Fatalf("success item status = %s, want success", statuses["ok"])
 	}
-	if statuses["bad"] != "pending" || statuses["spent"] != "pending" {
-		t.Fatalf("unfinished statuses = bad:%s spent:%s, want pending/pending", statuses["bad"], statuses["spent"])
+	if statuses["bad"] != "pending" || statuses["spent"] != "pending" || statuses["confirm"] != "pending" {
+		t.Fatalf("unfinished statuses = bad:%s spent:%s confirm:%s, want pending/pending/pending", statuses["bad"], statuses["spent"], statuses["confirm"])
 	}
 }
 
