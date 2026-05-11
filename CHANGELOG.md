@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.1 - 2026-05-11
+
+详见 [docs/release-notes/v0.6.1.md](docs/release-notes/v0.6.1.md)。
+
+- 修复本机 AI CLI 执行超时后子进程可能残留的问题，Unix 侧按进程组终止，Windows 侧保持单进程终止语义。
+- 新增 `QCLOOP_AGENT_TIMEOUT` / `QCLOOP_CODEX_TIMEOUT` / `QCLOOP_EXECUTOR_TIMEOUT` 及对应 `_MS` 环境变量，允许按执行器调整超时时间。
+- 补充 Unix 超时清理回归测试，覆盖父进程被取消后后台 child process 不再泄漏。
+
 ## v0.6.0 - 2026-05-10
 
 详见 [docs/release-notes/v0.6.0.md](docs/release-notes/v0.6.0.md)。

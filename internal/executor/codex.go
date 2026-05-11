@@ -18,7 +18,13 @@ type CodexExecutor struct {
 // NewCodexExecutor 创建 codex 执行器
 func NewCodexExecutor() *CodexExecutor {
 	return &CodexExecutor{
-		timeout:   5 * time.Minute,
+		timeout: executorTimeoutFromEnv(
+			5*time.Minute,
+			"QCLOOP_CODEX_TIMEOUT",
+			"QCLOOP_CODEX_TIMEOUT_MS",
+			"QCLOOP_EXECUTOR_TIMEOUT",
+			"QCLOOP_EXECUTOR_TIMEOUT_MS",
+		),
 		codexPath: os.Getenv("QCLOOP_CODEX_BIN"),
 	}
 }

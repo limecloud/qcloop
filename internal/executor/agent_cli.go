@@ -27,7 +27,16 @@ type AgentCLIExecutor struct {
 }
 
 func NewAgentCLIExecutor(spec AgentCLISpec) *AgentCLIExecutor {
-	return &AgentCLIExecutor{spec: spec, timeout: 5 * time.Minute}
+	return &AgentCLIExecutor{
+		spec: spec,
+		timeout: executorTimeoutFromEnv(
+			5*time.Minute,
+			"QCLOOP_AGENT_TIMEOUT",
+			"QCLOOP_AGENT_TIMEOUT_MS",
+			"QCLOOP_EXECUTOR_TIMEOUT",
+			"QCLOOP_EXECUTOR_TIMEOUT_MS",
+		),
+	}
 }
 
 func (e *AgentCLIExecutor) Execute(ctx context.Context, prompt string) (stdout, stderr string, exitCode int, err error) {

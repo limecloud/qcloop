@@ -1,6 +1,6 @@
 {
   "name": "@limecloud/qcloop-skill-cli",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "qcloop 技能 JSON CLI，供 AI agent 创建、启动、观察批量 QA loop",
   "bin": {
     "qcloop-skill": "scripts/run.js"

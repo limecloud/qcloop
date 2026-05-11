@@ -20,18 +20,45 @@ type executableProbeConfig struct {
 }
 
 func runCLICommand(ctx context.Context, path string, args []string, dir string) (stdout, stderr string, exitCode int, err error) {
-	cmd := exec.CommandContext(ctx, path, args...)
+	cmd := exec.Command(path, args...)
 	if strings.TrimSpace(dir) != "" {
 		cmd.Dir = strings.TrimSpace(dir)
 	}
+	prepareCommandForContext(cmd)
 
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 
-	err = cmd.Run()
+	if err = cmd.Start(); err != nil {
+		return "", "", -1, fmt.Errorf("执行失败: %w", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	timedOut := false
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		timedOut = true
+		_ = terminateCommandForContext(cmd)
+		err = <-done
+	}
+
 	stdout = outBuf.String()
 	stderr = errBuf.String()
+	if timedOut {
+		if stderr != "" {
+			stderr += "\n"
+		}
+		stderr += fmt.Sprintf("执行超时或已取消: %v", ctx.Err())
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return stdout, stderr, exitErr.ExitCode(), fmt.Errorf("执行超时或已取消: %w", ctx.Err())
+		}
+		return stdout, stderr, -1, fmt.Errorf("执行超时或已取消: %w", ctx.Err())
+	}
 	if err == nil {
 		return stdout, stderr, 0, nil
 	}
